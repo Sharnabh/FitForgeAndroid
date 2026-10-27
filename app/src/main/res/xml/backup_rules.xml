@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Exclude sensitive OAuth tokens from legacy full backups -->
+    <exclude domain="sharedpref" path="fitforge_chatgpt_secure_prefs.xml" />
+    <exclude domain="sharedpref" path="fitforge_chatgpt_prefs.xml" />
+</full-backup-content>
