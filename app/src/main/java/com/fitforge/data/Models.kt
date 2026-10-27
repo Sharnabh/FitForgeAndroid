@@ -236,6 +236,8 @@ data class BodyEntry(
     val waistCm: Double? = null,
     val neckCm: Double? = null,
     val chestCm: Double? = null,
-    val photoPath: String? = null,
+    val photoPath: String? = null, // Front photo (legacy & primary)
+    val photoPathBack: String? = null, // Back photo
+    val photoPathSide: String? = null, // Side photo
     val note: String = ""
 )

@@ -471,8 +471,16 @@ class FitForgeViewModel(
         }
     }
 
-    // Body weight & measurements
-    fun addBody(weight: Double, waist: Double?, photoPath: String? = null, neck: Double? = null, chest: Double? = null, note: String = "") {
+    fun addBody(
+        weight: Double,
+        waist: Double?,
+        photoPath: String? = null,
+        photoPathBack: String? = null,
+        photoPathSide: String? = null,
+        neck: Double? = null,
+        chest: Double? = null,
+        note: String = ""
+    ) {
         if (weight <= 0) return
         viewModelScope.launch {
             dao.insertBodyEntry(
@@ -483,6 +491,8 @@ class FitForgeViewModel(
                     neckCm = neck,
                     chestCm = chest,
                     photoPath = photoPath,
+                    photoPathBack = photoPathBack,
+                    photoPathSide = photoPathSide,
                     note = note
                 )
             )
@@ -1197,7 +1207,11 @@ class FitForgeViewModel(
 
         val session = chatGptSession ?: return
         val contextSummary = buildFitnessContext()
-        val photoToAttach = if (attachProgressPhoto) latestBody.value?.photoPath else null
+        val photosToAttach = if (attachProgressPhoto) {
+            latestBody.value?.let { b ->
+                listOfNotNull(b.photoPath, b.photoPathBack, b.photoPathSide).filter { it.isNotBlank() }
+            } ?: emptyList()
+        } else emptyList()
 
         // Opt-in per-request: reset immediately so subsequent messages do not automatically re-upload photo
         attachProgressPhoto = false
@@ -1205,7 +1219,7 @@ class FitForgeViewModel(
         val userMessage = CoachMessage(
             isUser = true,
             text = prompt,
-            hasPhotoAttached = photoToAttach != null
+            hasPhotoAttached = photosToAttach.isNotEmpty()
         )
         val placeholder = CoachMessage(
             isUser = false,
@@ -1245,7 +1259,7 @@ class FitForgeViewModel(
                 accessToken = token,
                 userPrompt = prompt,
                 fitnessContext = contextSummary,
-                photoPath = photoToAttach,
+                photoPaths = photosToAttach,
                 conversationHistory = coachMessages.dropLast(2),
                 modelSlug = modelToUse,
                 onDelta = { delta ->

@@ -23,7 +23,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -41,6 +43,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -76,7 +79,10 @@ fun BodyScreen(vm: FitForgeViewModel) {
     var neck by remember { mutableStateOf("") }
     var chest by remember { mutableStateOf("") }
     var note by remember { mutableStateOf("") }
-    var photoPath by remember { mutableStateOf<String?>(null) }
+    var photoPathFront by remember { mutableStateOf<String?>(null) }
+    var photoPathBack by remember { mutableStateOf<String?>(null) }
+    var photoPathSide by remember { mutableStateOf<String?>(null) }
+    var activePhotoSlot by remember { mutableStateOf("FRONT") }
     var showMoreFields by remember { mutableStateOf(false) }
 
     var editingEntry by remember { mutableStateOf<BodyEntry?>(null) }
@@ -87,9 +93,14 @@ fun BodyScreen(vm: FitForgeViewModel) {
             runCatching {
                 val input = context.contentResolver.openInputStream(uri)!!
                 val dir = File(context.filesDir, "progress_photos").apply { mkdirs() }
-                val target = File(dir, "progress_${System.currentTimeMillis()}.jpg")
+                val slot = activePhotoSlot.lowercase()
+                val target = File(dir, "progress_${slot}_${System.currentTimeMillis()}.jpg")
                 input.use { source -> FileOutputStream(target).use { sink -> source.copyTo(sink) } }
-                photoPath = target.absolutePath
+                when (activePhotoSlot) {
+                    "FRONT" -> photoPathFront = target.absolutePath
+                    "BACK" -> photoPathBack = target.absolutePath
+                    "SIDE" -> photoPathSide = target.absolutePath
+                }
             }
         }
     }
@@ -155,30 +166,27 @@ fun BodyScreen(vm: FitForgeViewModel) {
                         )
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        TextButton(onClick = { showMoreFields = !showMoreFields }) {
-                            Text(if (showMoreFields) "Fewer fields" else "+ Neck, Chest & Notes", style = MaterialTheme.typography.labelMedium)
-                        }
+                    TextButton(onClick = { showMoreFields = !showMoreFields }) {
+                        Text(if (showMoreFields) "Fewer fields" else "+ Neck, Chest & Notes", style = MaterialTheme.typography.labelMedium)
+                    }
 
-                        if (photoPath != null) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("Photo attached", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                                IconButton(onClick = { photoPath = null }, modifier = Modifier.size(24.dp)) {
-                                    Icon(Icons.Default.Close, contentDescription = "Remove photo", modifier = Modifier.size(16.dp))
-                                }
+                    // Three photo slots: Front, Back, Side
+                    ProgressPhotoSlots(
+                        photoPathFront = photoPathFront,
+                        photoPathBack = photoPathBack,
+                        photoPathSide = photoPathSide,
+                        onPickPhoto = { slot ->
+                            activePhotoSlot = slot
+                            photoPicker.launch("image/*")
+                        },
+                        onRemovePhoto = { slot ->
+                            when (slot) {
+                                "FRONT" -> photoPathFront = null
+                                "BACK" -> photoPathBack = null
+                                "SIDE" -> photoPathSide = null
                             }
                         }
-                    }
-
-                    OutlinedButton(onClick = { photoPicker.launch("image/*") }, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(if (photoPath == null) "Attach progress photo (optional)" else "Change photo")
-                    }
+                    )
 
                     Button(
                         onClick = {
@@ -187,7 +195,9 @@ fun BodyScreen(vm: FitForgeViewModel) {
                                 vm.addBody(
                                     weight = w,
                                     waist = waist.toDoubleOrNull(),
-                                    photoPath = photoPath,
+                                    photoPath = photoPathFront,
+                                    photoPathBack = photoPathBack,
+                                    photoPathSide = photoPathSide,
                                     neck = neck.toDoubleOrNull(),
                                     chest = chest.toDoubleOrNull(),
                                     note = note.trim()
@@ -196,7 +206,9 @@ fun BodyScreen(vm: FitForgeViewModel) {
                                 neck = ""
                                 chest = ""
                                 note = ""
-                                photoPath = null
+                                photoPathFront = null
+                                photoPathBack = null
+                                photoPathSide = null
                             }
                         },
                         enabled = (weight.toDoubleOrNull() ?: 0.0) > 0.0,
@@ -252,31 +264,7 @@ fun BodyScreen(vm: FitForgeViewModel) {
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            if (entry.photoPath != null && File(entry.photoPath).exists()) {
-                                val bitmap = remember(entry.photoPath) {
-                                    runCatching { BitmapFactory.decodeFile(entry.photoPath)?.asImageBitmap() }.getOrNull()
-                                }
-                                if (bitmap != null) {
-                                    Image(
-                                        bitmap = bitmap,
-                                        contentDescription = "Progress Photo",
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier
-                                            .size(54.dp)
-                                            .clip(RoundedCornerShape(8.dp))
-                                    )
-                                } else {
-                                    Surface(
-                                        shape = RoundedCornerShape(8.dp),
-                                        color = MaterialTheme.colorScheme.surfaceVariant,
-                                        modifier = Modifier.size(54.dp)
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Icon(Icons.Default.Photo, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        }
-                                    }
-                                }
-                            }
+                            EntryPhotosThumbnailRow(entry)
 
                             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                 Text(entry.date, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
@@ -379,16 +367,24 @@ private fun EditBodyEntryBottomSheet(
     var editNeck by remember { mutableStateOf(entry.neckCm?.let { "$it" } ?: "") }
     var editChest by remember { mutableStateOf(entry.chestCm?.let { "$it" } ?: "") }
     var editNote by remember { mutableStateOf(entry.note) }
-    var editPhotoPath by remember { mutableStateOf(entry.photoPath) }
+    var editPhotoPathFront by remember { mutableStateOf(entry.photoPath) }
+    var editPhotoPathBack by remember { mutableStateOf(entry.photoPathBack) }
+    var editPhotoPathSide by remember { mutableStateOf(entry.photoPathSide) }
+    var editActivePhotoSlot by remember { mutableStateOf("FRONT") }
 
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null) {
             runCatching {
                 val input = context.contentResolver.openInputStream(uri)!!
                 val dir = File(context.filesDir, "progress_photos").apply { mkdirs() }
-                val target = File(dir, "progress_${System.currentTimeMillis()}.jpg")
+                val slot = editActivePhotoSlot.lowercase()
+                val target = File(dir, "progress_${slot}_${System.currentTimeMillis()}.jpg")
                 input.use { source -> FileOutputStream(target).use { sink -> source.copyTo(sink) } }
-                editPhotoPath = target.absolutePath
+                when (editActivePhotoSlot) {
+                    "FRONT" -> editPhotoPathFront = target.absolutePath
+                    "BACK" -> editPhotoPathBack = target.absolutePath
+                    "SIDE" -> editPhotoPathSide = target.absolutePath
+                }
             }
         }
     }
@@ -480,46 +476,28 @@ private fun EditBodyEntryBottomSheet(
                 maxLines = 3
             )
 
-            // Progress photo preview & management
+            // Progress photos preview & management (Front, Back, Side)
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Progress Photo", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelLarge)
-                    if (editPhotoPath != null && File(editPhotoPath!!).exists()) {
-                        val bitmap = remember(editPhotoPath) {
-                            runCatching { BitmapFactory.decodeFile(editPhotoPath)?.asImageBitmap() }.getOrNull()
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            if (bitmap != null) {
-                                Image(
-                                    bitmap = bitmap,
-                                    contentDescription = "Current photo",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.size(72.dp).clip(RoundedCornerShape(8.dp))
-                                )
-                            }
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                OutlinedButton(onClick = { photoPicker.launch("image/*") }) {
-                                    Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Change Photo", style = MaterialTheme.typography.bodySmall)
-                                }
-                                TextButton(onClick = { editPhotoPath = null }) {
-                                    Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Remove Photo", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                                }
+                    ProgressPhotoSlots(
+                        photoPathFront = editPhotoPathFront,
+                        photoPathBack = editPhotoPathBack,
+                        photoPathSide = editPhotoPathSide,
+                        onPickPhoto = { slot ->
+                            editActivePhotoSlot = slot
+                            photoPicker.launch("image/*")
+                        },
+                        onRemovePhoto = { slot ->
+                            when (slot) {
+                                "FRONT" -> editPhotoPathFront = null
+                                "BACK" -> editPhotoPathBack = null
+                                "SIDE" -> editPhotoPathSide = null
                             }
                         }
-                    } else {
-                        OutlinedButton(onClick = { photoPicker.launch("image/*") }, modifier = Modifier.fillMaxWidth()) {
-                            Icon(Icons.Default.AddAPhoto, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Attach Progress Photo")
-                        }
-                    }
+                    )
                 }
             }
 
@@ -550,7 +528,9 @@ private fun EditBodyEntryBottomSheet(
                                     neckCm = editNeck.toDoubleOrNull(),
                                     chestCm = editChest.toDoubleOrNull(),
                                     note = editNote.trim(),
-                                    photoPath = editPhotoPath
+                                    photoPath = editPhotoPathFront,
+                                    photoPathBack = editPhotoPathBack,
+                                    photoPathSide = editPhotoPathSide
                                 )
                             )
                         }
@@ -566,6 +546,203 @@ private fun EditBodyEntryBottomSheet(
             }
 
             Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+fun ProgressPhotoSlots(
+    photoPathFront: String?,
+    photoPathBack: String?,
+    photoPathSide: String?,
+    onPickPhoto: (slot: String) -> Unit,
+    onRemovePhoto: (slot: String) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Progress Photos (Front, Back & Side)",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold
+            )
+            val count = listOfNotNull(photoPathFront, photoPathBack, photoPathSide).size
+            if (count > 0) {
+                Text(
+                    "$count / 3 attached",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            ProgressPhotoSlotItem(
+                label = "Front View",
+                photoPath = photoPathFront,
+                modifier = Modifier.weight(1f),
+                onClick = { onPickPhoto("FRONT") },
+                onRemove = { onRemovePhoto("FRONT") }
+            )
+            ProgressPhotoSlotItem(
+                label = "Back View",
+                photoPath = photoPathBack,
+                modifier = Modifier.weight(1f),
+                onClick = { onPickPhoto("BACK") },
+                onRemove = { onRemovePhoto("BACK") }
+            )
+            ProgressPhotoSlotItem(
+                label = "Side View",
+                photoPath = photoPathSide,
+                modifier = Modifier.weight(1f),
+                onClick = { onPickPhoto("SIDE") },
+                onRemove = { onRemovePhoto("SIDE") }
+            )
+        }
+    }
+}
+
+@Composable
+fun ProgressPhotoSlotItem(
+    label: String,
+    photoPath: String?,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+    onRemove: () -> Unit
+) {
+    val bitmap = remember(photoPath) {
+        if (!photoPath.isNullOrBlank() && File(photoPath).exists()) {
+            runCatching { BitmapFactory.decodeFile(photoPath)?.asImageBitmap() }.getOrNull()
+        } else null
+    }
+
+    Surface(
+        modifier = modifier
+            .height(112.dp)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(12.dp),
+        color = if (bitmap != null) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+        border = BorderStroke(
+            1.dp,
+            if (bitmap != null) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        )
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = label,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+                Surface(
+                    color = Color.Black.copy(alpha = 0.7f),
+                    shape = RoundedCornerShape(topEnd = 6.dp),
+                    modifier = Modifier.align(Alignment.BottomStart)
+                ) {
+                    Text(
+                        label,
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onRemove,
+                    modifier = Modifier
+                        .size(26.dp)
+                        .padding(2.dp)
+                        .align(Alignment.TopEnd)
+                        .background(Color.Black.copy(alpha = 0.65f), CircleShape)
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Remove $label",
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        Icons.Default.AddAPhoto,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "+ Add",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun EntryPhotosThumbnailRow(entry: BodyEntry) {
+    val photos = remember(entry) {
+        listOfNotNull(
+            entry.photoPath?.let { "Front" to it },
+            entry.photoPathBack?.let { "Back" to it },
+            entry.photoPathSide?.let { "Side" to it }
+        ).filter { File(it.second).exists() }
+    }
+    if (photos.isNotEmpty()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            photos.forEach { (tag, path) ->
+                val bm = remember(path) {
+                    runCatching { BitmapFactory.decodeFile(path)?.asImageBitmap() }.getOrNull()
+                }
+                if (bm != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                    ) {
+                        Image(
+                            bitmap = bm,
+                            contentDescription = tag,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        Surface(
+                            color = Color.Black.copy(alpha = 0.7f),
+                            shape = RoundedCornerShape(topEnd = 4.dp),
+                            modifier = Modifier.align(Alignment.BottomStart)
+                        ) {
+                            Text(
+                                tag,
+                                color = Color.White,
+                                fontSize = 8.sp,
+                                modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

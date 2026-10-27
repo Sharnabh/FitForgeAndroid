@@ -101,6 +101,7 @@ object ChatGptClient {
         userPrompt: String,
         fitnessContext: String,
         photoPath: String? = null,
+        photoPaths: List<String> = emptyList(),
         conversationHistory: List<CoachMessage> = emptyList(),
         modelSlug: String? = null,
         onDelta: (String) -> Unit
@@ -141,7 +142,7 @@ object ChatGptClient {
                 - You are NOT a medical doctor, registered dietitian, or licensed physical therapist.
                 - Do not provide clinical medical diagnosis, prescription, or clinical dietary treatment.
                 - If the user reports acute pain, injury, eating disorder behaviors, or unsafe/extreme caloric deficits (<1200 kcal/day), firmly and compassionately advise them to consult a qualified physician or healthcare professional.
-                - When progress photos are provided, discuss general posture, symmetry, and habit consistency respectfully and objectively without body-shaming. Keep responses concise and formatted with clean bullet points.
+                - When progress photos (front, back, and/or side views) are provided, evaluate posture, spinal alignment, front-to-back balance, muscular symmetry, and habit consistency respectfully, constructively, and objectively. Keep responses concise and formatted with clean bullet points.
             """.trimIndent()
 
             // Build request payload according to Responses API preview specification
@@ -178,25 +179,28 @@ object ChatGptClient {
                 appendLine(userPrompt)
             }
 
-            // Optional multimodal photo attached
-            if (!photoPath.isNullOrBlank()) {
-                val base64DataUri = loadAndCompressImageBase64(context, photoPath)
-                if (base64DataUri != null) {
-                    val contentArr = JSONArray()
-                    val textObj = JSONObject().apply {
-                        put("type", "input_text")
-                        put("text", combinedText)
-                    }
-                    val imageObj = JSONObject().apply {
-                        put("type", "input_image")
-                        put("image_url", base64DataUri)
-                    }
-                    contentArr.put(textObj)
-                    contentArr.put(imageObj)
-                    currentTurn.put("content", contentArr)
-                } else {
-                    currentTurn.put("content", combinedText)
+            // Optional multimodal photos attached (front, back, and side views altogether)
+            val allPhotos = (photoPaths + listOfNotNull(photoPath)).filter { it.isNotBlank() }.distinct()
+            if (allPhotos.isNotEmpty()) {
+                val contentArr = JSONArray()
+                val textObj = JSONObject().apply {
+                    put("type", "input_text")
+                    put("text", combinedText)
                 }
+                contentArr.put(textObj)
+
+                for (path in allPhotos) {
+                    val base64DataUri = loadAndCompressImageBase64(context, path)
+                    if (base64DataUri != null) {
+                        val imageObj = JSONObject().apply {
+                            put("type", "input_image")
+                            put("image_url", base64DataUri)
+                        }
+                        contentArr.put(imageObj)
+                    }
+                }
+
+                currentTurn.put("content", contentArr)
             } else {
                 currentTurn.put("content", combinedText)
             }
