@@ -116,7 +116,7 @@ fun CoachScreen(vm: FitForgeViewModel, onBack: (() -> Unit)? = null) {
                     onClick = { selectedEngine = CoachEngine.Ishita },
                     text = {
                         Text(
-                            "Local (Ishita)",
+                            "Local (On-Device)",
                             fontWeight = if (selectedEngine == CoachEngine.Ishita) FontWeight.Bold else FontWeight.Normal
                         )
                     },

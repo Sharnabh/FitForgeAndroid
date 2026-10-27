@@ -46,6 +46,7 @@ dependencies {
     ksp("androidx.room:room-compiler:2.8.5")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    implementation("io.github.ljcamargo:llamacpp-kotlin:0.4.0")
     testImplementation("junit:junit:4.13.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

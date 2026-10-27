@@ -1,6 +1,9 @@
 package com.fitforge.ishita.ui
 
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -29,15 +32,21 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FitnessCenter
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -48,6 +57,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -56,6 +66,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -80,9 +91,9 @@ import com.fitforge.ishita.data.AccountabilityContextDto
 import com.fitforge.ishita.data.ActiveBlock
 import com.fitforge.ishita.data.AppUsageDto
 import com.fitforge.ishita.data.AppUsageStat
-import com.fitforge.ishita.data.BridgeHealth
-import com.fitforge.ishita.data.IshitaClient
 import com.fitforge.ishita.data.IshitaEvent
+import com.fitforge.ishita.data.OnDeviceIshitaClient
+import com.fitforge.ishita.data.OnDeviceModelManager
 import com.fitforge.ishita.data.ProposedAction
 import com.fitforge.ishita.data.UsageStatsRepository
 import com.fitforge.ishita.data.WebsiteUsageDto
@@ -97,12 +108,16 @@ fun IshitaScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val client = remember { IshitaClient(context) }
+    val modelManager = remember { OnDeviceModelManager(context) }
+    val client = remember { OnDeviceIshitaClient(context) }
     val usageRepo = remember { UsageStatsRepository(context) }
     val blockManager = remember { AccountabilityBlockManager.get(context) }
 
-    var isPaired by remember { mutableStateOf(client.isConnected()) }
-    var bridgeHealth by remember { mutableStateOf<BridgeHealth?>(null) }
+    var isModelDownloaded by remember { mutableStateOf(modelManager.isModelDownloaded()) }
+    var isModelLoading by remember { mutableStateOf(false) }
+    var isDownloading by remember { mutableStateOf(false) }
+    var downloadProgress by remember { mutableStateOf(0f) }
+    var downloadStatusText by remember { mutableStateOf("") }
     var showSettingsDialog by remember { mutableStateOf(false) }
 
     // Screen & web time
@@ -116,7 +131,7 @@ fun IshitaScreen(
         mutableStateListOf(
             CoachMessage(
                 isUser = false,
-                text = "I am Ishita. I don't care about your excuses—only your discipline and consistency. Did you train today, or did you waste hours staring at your phone?"
+                text = "I am Ishita, your on-device accountability coach powered by Gemmasutra Mini 2B. Everything runs 100% locally and privately on your phone. I don't tolerate excuses—only discipline and consistency. Did you train today, or did you waste hours staring at screens?"
             )
         )
     }
@@ -141,14 +156,34 @@ fun IshitaScreen(
                 appUsageStats = usageRepo.getDailyUsageStats(hoursBack = 24, maxResults = 5)
             }
             webUsageStats = blockManager.getDailyWebsiteUsage(hoursBack = 24, maxResults = 5)
-            if (isPaired) {
-                bridgeHealth = client.checkHealth().getOrNull()
-            }
         }
     }
 
     LaunchedEffect(Unit) {
         refreshStats()
+    }
+
+    // Document picker to import GGUF model directly from device storage
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            isDownloading = true
+            downloadStatusText = "Importing local GGUF file..."
+            scope.launch {
+                val res = modelManager.importModelFromUri(uri) { copied, _ ->
+                    val mb = copied / (1024.0 * 1024.0)
+                    downloadStatusText = String.format("Importing: %.1f MB copied", mb)
+                }
+                isDownloading = false
+                if (res.isSuccess) {
+                    isModelDownloaded = true
+                    Toast.makeText(context, "Gemmasutra Mini 2B imported successfully!", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Import failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     fun sendMessage(textToSend: String) {
@@ -161,7 +196,7 @@ fun IshitaScreen(
         val assistantMsg = CoachMessage(id = assistantMsgId, isUser = false, text = "")
         messages.add(assistantMsg)
         isStreaming = true
-        streamingStatus = "Connecting to Ishita on Mac..."
+        streamingStatus = "Running on-device inference (Gemmasutra 2B)..."
 
         scope.launch {
             // Build current accountability context
@@ -188,13 +223,12 @@ fun IshitaScreen(
             )
 
             var accumulatedText = ""
-            // Send history excluding the current user message and placeholder assistant message
             val hist = if (messages.size >= 2) messages.dropLast(2) else emptyList()
 
             client.streamChat(textToSend, accContext, hist).collect { event ->
                 when (event) {
                     is IshitaEvent.Connected -> {
-                        streamingStatus = "Connected to local model • Analyzing..."
+                        streamingStatus = "Model loaded • Generating verdict..."
                     }
                     is IshitaEvent.TextDelta -> {
                         accumulatedText += event.delta
@@ -245,22 +279,22 @@ fun IshitaScreen(
                 Column {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            Icons.Default.AutoAwesome,
+                            Icons.Default.Memory,
                             contentDescription = null,
                             tint = FitForgeThemeColors.Secondary,
                             modifier = Modifier.size(22.dp)
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "Ishita (Local Mac)",
+                            "Ishita (Gemmasutra 2B)",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.ExtraBold
                         )
                     }
                     Text(
-                        if (isPaired) "Connected to Mac • Strict Discipline" else "Not Paired with Mac Bridge",
+                        if (isModelDownloaded) "On-Device • Offline • Strict Discipline" else "Model Setup Required",
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (isPaired) FitForgeThemeColors.Primary else MaterialTheme.colorScheme.error
+                        color = if (isModelDownloaded) FitForgeThemeColors.Primary else MaterialTheme.colorScheme.error
                     )
                 }
             }
@@ -277,13 +311,37 @@ fun IshitaScreen(
 
         Spacer(Modifier.height(8.dp))
 
-        // UNPAIRED ONBOARDING CARD
-        if (!isPaired) {
-            IshitaPairingCard(
-                client = client,
-                onPaired = {
-                    isPaired = true
-                    refreshStats()
+        // MODEL DOWNLOAD / IMPORT ONBOARDING CARD
+        if (!isModelDownloaded) {
+            OnDeviceModelCard(
+                modelManager = modelManager,
+                isDownloading = isDownloading,
+                downloadProgress = downloadProgress,
+                downloadStatusText = downloadStatusText,
+                onStartDownload = {
+                    isDownloading = true
+                    scope.launch {
+                        val res = modelManager.downloadModel { downloaded, total, percent ->
+                            downloadProgress = percent
+                            val dlMb = downloaded / (1024.0 * 1024.0)
+                            val totalMb = total / (1024.0 * 1024.0)
+                            downloadStatusText = if (total > 0) {
+                                String.format("%.0f MB / %.0f MB (%.0f%%)", dlMb, totalMb, percent * 100)
+                            } else {
+                                String.format("%.1f MB downloaded", dlMb)
+                            }
+                        }
+                        isDownloading = false
+                        if (res.isSuccess) {
+                            isModelDownloaded = true
+                            Toast.makeText(context, "Gemmasutra Mini 2B is ready!", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Download failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                },
+                onPickLocalFile = {
+                    filePickerLauncher.launch(arrayOf("*/*", "application/octet-stream"))
                 }
             )
             return@Column
@@ -537,15 +595,208 @@ fun IshitaScreen(
 
     // SETTINGS DIALOG
     if (showSettingsDialog) {
-        IshitaSettingsDialog(
+        OnDeviceModelSettingsDialog(
+            modelManager = modelManager,
             client = client,
-            onDismiss = { showSettingsDialog = false },
-            onDisconnected = {
-                isPaired = false
+            onPickLocalFile = {
+                filePickerLauncher.launch(arrayOf("*/*", "application/octet-stream"))
+            },
+            onModelDeleted = {
+                client.release()
+                isModelDownloaded = false
                 showSettingsDialog = false
-            }
+            },
+            onDismiss = { showSettingsDialog = false }
         )
     }
+}
+
+@Composable
+fun OnDeviceModelCard(
+    modelManager: OnDeviceModelManager,
+    isDownloading: Boolean,
+    downloadProgress: Float,
+    downloadStatusText: String,
+    onStartDownload: () -> Unit,
+    onPickLocalFile: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = FitForgeThemeColors.SurfaceElevated),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Memory, null, tint = FitForgeThemeColors.Secondary, modifier = Modifier.size(30.dp))
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text("Gemmasutra Mini 2B", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("On-Device Local Inference • 100% Offline & Private", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            Surface(
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("• Model: Gemmasutra-Mini-2B-v1 (Q4_K_M Quantized)", style = MaterialTheme.typography.bodySmall)
+                    Text("• File Size: ~1.4 GB GGUF", style = MaterialTheme.typography.bodySmall)
+                    Text("• Engine: llama.cpp native on-device runtime", style = MaterialTheme.typography.bodySmall)
+                    Text("• Zero network calls: Your data never leaves this phone", style = MaterialTheme.typography.bodySmall, color = FitForgeThemeColors.Primary, fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            if (isDownloading) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (downloadProgress > 0f) {
+                        LinearProgressIndicator(
+                            progress = { downloadProgress },
+                            modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                            color = FitForgeThemeColors.Secondary
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                            color = FitForgeThemeColors.Secondary
+                        )
+                    }
+                    Text(
+                        downloadStatusText.ifEmpty { "Downloading model..." },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = FitForgeThemeColors.Secondary,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+            } else {
+                Button(
+                    onClick = onStartDownload,
+                    colors = ButtonDefaults.buttonColors(containerColor = FitForgeThemeColors.Secondary),
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("DOWNLOAD GEMMASUTRA MINI 2B (~1.4 GB)", fontWeight = FontWeight.Bold)
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                OutlinedButton(
+                    onClick = onPickLocalFile,
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Import Existing .GGUF File", fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun OnDeviceModelSettingsDialog(
+    modelManager: OnDeviceModelManager,
+    client: OnDeviceIshitaClient,
+    onPickLocalFile: () -> Unit,
+    onModelDeleted: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var isReloading by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("On-Device Model Settings") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Model: ${OnDeviceModelManager.MODEL_DISPLAY_NAME}", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                        Text("Storage: ${modelManager.getModelFileSizeFormatted()}", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "Status: " + if (client.isModelLoaded) "Loaded in RAM" else "Stored on Device",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (client.isModelLoaded) FitForgeThemeColors.Primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = {
+                        isReloading = true
+                        scope.launch {
+                            val res = client.loadModel()
+                            isReloading = false
+                            if (res.isSuccess) {
+                                Toast.makeText(context, "Model loaded into memory!", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Error: ${res.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    },
+                    enabled = !isReloading,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (isReloading) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Loading...")
+                    } else {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Reload Model into RAM")
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        onDismiss()
+                        onPickLocalFile()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Import Different GGUF")
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        val deleted = modelManager.deleteModel()
+                        if (deleted) {
+                            Toast.makeText(context, "Model deleted. Storage reclaimed.", Toast.LENGTH_SHORT).show()
+                            onModelDeleted()
+                        }
+                    },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Delete Model File (~1.4 GB)")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
 }
 
 @Composable
@@ -574,26 +825,38 @@ fun ProposalActionCard(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        "PROPOSED RESTRICTION",
+                        proposal.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = FitForgeThemeColors.Secondary
+                    )
+                }
+
+                Surface(
+                    color = FitForgeThemeColors.Secondary.copy(alpha = 0.2f),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        proposal.type,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                         style = MaterialTheme.typography.labelSmall,
                         color = FitForgeThemeColors.Secondary,
                         fontWeight = FontWeight.Bold
                     )
                 }
-                Text(
-                    proposal.type,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
 
             Spacer(Modifier.height(6.dp))
-            Text(proposal.title, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(4.dp))
-            Text(proposal.reason, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
-            Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Text(
+                proposal.reason,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(Modifier.height(10.dp))
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = onConfirm,
                     colors = ButtonDefaults.buttonColors(containerColor = FitForgeThemeColors.Secondary),
@@ -718,7 +981,7 @@ fun MessageBubble(msg: CoachMessage) {
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            "Connecting to local model...",
+                            "Gemmasutra 2B is thinking...",
                             style = MaterialTheme.typography.bodySmall.copy(
                                 fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
                             ),
@@ -729,140 +992,4 @@ fun MessageBubble(msg: CoachMessage) {
             }
         }
     }
-}
-
-@Composable
-fun IshitaPairingCard(
-    client: IshitaClient,
-    onPaired: () -> Unit
-) {
-    var bridgeUrl by remember { mutableStateOf(client.getBridgeUrl()) }
-    var pairCode by remember { mutableStateOf("") }
-    var isSubmitting by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
-
-    Card(
-        colors = CardDefaults.cardColors(containerColor = FitForgeThemeColors.SurfaceElevated),
-        shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(Modifier.padding(20.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Computer, null, tint = FitForgeThemeColors.Primary, modifier = Modifier.size(28.dp))
-                Spacer(Modifier.width(10.dp))
-                Column {
-                    Text("Connect to Your Mac", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text("Private local inference over Tailscale", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-
-            Spacer(Modifier.height(16.dp))
-
-            OutlinedTextField(
-                value = bridgeUrl,
-                onValueChange = { bridgeUrl = it },
-                label = { Text("Bridge URL (e.g. Tailscale or LAN IP)") },
-                placeholder = { Text("http://192.168.1.50:8765") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(Modifier.height(10.dp))
-
-            OutlinedTextField(
-                value = pairCode,
-                onValueChange = { pairCode = it.uppercase() },
-                label = { Text("6-Character Pairing Code") },
-                placeholder = { Text("ABC123") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            if (errorMessage != null) {
-                Spacer(Modifier.height(8.dp))
-                Text(errorMessage!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            }
-
-            Spacer(Modifier.height(16.dp))
-
-            Button(
-                onClick = {
-                    client.setBridgeUrl(bridgeUrl)
-                    isSubmitting = true
-                    errorMessage = null
-                    scope.launch {
-                        val res = client.pair(pairCode)
-                        isSubmitting = false
-                        if (res.isSuccess) {
-                            onPaired()
-                        } else {
-                            errorMessage = res.exceptionOrNull()?.localizedMessage ?: "Pairing failed"
-                        }
-                    }
-                },
-                enabled = pairCode.isNotBlank() && !isSubmitting,
-                colors = ButtonDefaults.buttonColors(containerColor = FitForgeThemeColors.Primary),
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                shape = RoundedCornerShape(10.dp)
-            ) {
-                if (isSubmitting) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = FitForgeThemeColors.OnPrimary)
-                } else {
-                    Text("PAIR WITH MAC", color = FitForgeThemeColors.OnPrimary, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun IshitaSettingsDialog(
-    client: IshitaClient,
-    onDismiss: () -> Unit,
-    onDisconnected: () -> Unit
-) {
-    var urlInput by remember { mutableStateOf(client.getBridgeUrl()) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Ishita Connection Settings") },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = urlInput,
-                    onValueChange = { urlInput = it },
-                    label = { Text("Bridge URL") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(12.dp))
-                Button(
-                    onClick = {
-                        client.setBridgeUrl(urlInput)
-                        onDismiss()
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Save URL")
-                }
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(
-                    onClick = {
-                        client.disconnect()
-                        onDisconnected()
-                    },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Disconnect & Revoke Pair")
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Close")
-            }
-        }
-    )
 }
