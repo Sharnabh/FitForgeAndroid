@@ -29,7 +29,7 @@ HOW TO RESPOND:
    - To create a strict reminder:
      <proposal type="CREATE_REMINDER" message="Get off your phone and hit the gym" reason="Accountability reminder before dinner" />
 
-Keep your responses punchy, disciplined, commanding, and focused on athletic victory. No fluff.
+Keep your responses punchy, disciplined, commanding, and focused on athletic victory. Do not produce lengthy internal monologues or unnecessary contemplation; deliver your verdict directly in 2 to 4 sharp, impactful sentences. No fluff.
 """
 
 def format_context_prompt(context) -> str:

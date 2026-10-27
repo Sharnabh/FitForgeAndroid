@@ -122,8 +122,16 @@ fun IshitaScreen(
     }
     val pendingProposals = remember { mutableStateListOf<ProposedAction>() }
     var isStreaming by remember { mutableStateOf(false) }
+    var streamingStatus by remember { mutableStateOf("Ishita is analyzing your discipline...") }
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+
+    // Auto-scroll as messages update or text streams in
+    LaunchedEffect(messages.size, messages.lastOrNull()?.text) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
 
     // Refresh context data
     fun refreshStats() {
@@ -153,6 +161,7 @@ fun IshitaScreen(
         val assistantMsg = CoachMessage(id = assistantMsgId, isUser = false, text = "")
         messages.add(assistantMsg)
         isStreaming = true
+        streamingStatus = "Connecting to Ishita on Mac..."
 
         scope.launch {
             // Build current accountability context
@@ -179,10 +188,17 @@ fun IshitaScreen(
             )
 
             var accumulatedText = ""
-            client.streamChat(textToSend, accContext, messages.dropLast(1)).collect { event ->
+            // Send history excluding the current user message and placeholder assistant message
+            val hist = if (messages.size >= 2) messages.dropLast(2) else emptyList()
+
+            client.streamChat(textToSend, accContext, hist).collect { event ->
                 when (event) {
+                    is IshitaEvent.Connected -> {
+                        streamingStatus = "Connected to local model • Analyzing..."
+                    }
                     is IshitaEvent.TextDelta -> {
                         accumulatedText += event.delta
+                        streamingStatus = "Ishita is responding..."
                         val idx = messages.indexOfFirst { it.id == assistantMsgId }
                         if (idx != -1) {
                             messages[idx] = messages[idx].copy(text = accumulatedText)
@@ -194,7 +210,9 @@ fun IshitaScreen(
                     is IshitaEvent.Error -> {
                         val idx = messages.indexOfFirst { it.id == assistantMsgId }
                         if (idx != -1) {
-                            messages[idx] = messages[idx].copy(text = "${messages[idx].text}\n[Error: ${event.message}]")
+                            val currentText = messages[idx].text
+                            val errNote = if (currentText.isBlank()) "[Error: ${event.message}]" else "$currentText\n[Error: ${event.message}]"
+                            messages[idx] = messages[idx].copy(text = errNote)
                         }
                     }
                     is IshitaEvent.Done -> {
@@ -451,15 +469,18 @@ fun IshitaScreen(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(messages) { msg ->
+            items(messages, key = { it.id }) { msg ->
                 MessageBubble(msg)
             }
             if (isStreaming) {
                 item {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = FitForgeThemeColors.Secondary)
+                    Row(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = FitForgeThemeColors.Secondary)
                         Spacer(Modifier.width(8.dp))
-                        Text("Ishita is analyzing your discipline...", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(streamingStatus, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -599,6 +620,25 @@ fun ProposalActionCard(
 @Composable
 fun MessageBubble(msg: CoachMessage) {
     val isUser = msg.isUser
+    val raw = msg.text
+
+    // Separate thinking monologue from actual coach verdict if present
+    val (thoughtText, responseText) = remember(raw) {
+        if (raw.contains("<think>")) {
+            val parts = raw.split("</think>", limit = 2)
+            val thought = parts[0].substringAfter("<think>").trim()
+            val rest = if (parts.size > 1) parts[1].trim() else ""
+            Pair(thought, rest)
+        } else {
+            Pair("", raw)
+        }
+    }
+
+    // Strip raw XML proposal tags from displayed text (they are shown as interactive cards above)
+    val displayResponse = remember(responseText) {
+        responseText.replace(Regex("<proposal[^>]*/>", RegexOption.IGNORE_CASE), "").trim()
+    }
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
@@ -623,11 +663,69 @@ fun MessageBubble(msg: CoachMessage) {
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    text = msg.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+
+                if (!isUser && thoughtText.isNotEmpty()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
+                    ) {
+                        Column(Modifier.padding(8.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = FitForgeThemeColors.Secondary.copy(alpha = 0.7f),
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    if (displayResponse.isEmpty()) "Ishita is analyzing..." else "Discipline Assessment",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = FitForgeThemeColors.Secondary.copy(alpha = 0.8f),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            if (displayResponse.isEmpty()) {
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    thoughtText,
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                                    ),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (displayResponse.isNotEmpty()) {
+                    Text(
+                        text = displayResponse,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                } else if (!isUser && thoughtText.isEmpty()) {
+                    Row(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(12.dp),
+                            strokeWidth = 1.5.dp,
+                            color = FitForgeThemeColors.Secondary
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "Connecting to local model...",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         }
     }

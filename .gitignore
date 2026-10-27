@@ -50,6 +50,13 @@ captures/
 # Google Services (Firebase / Auth configs if any)
 google-services.json
 
+# Python & Bridge
+__pycache__/
+*.py[cod]
+*$py.class
+*.db
+bridge/.venv/
+
 # OS specific
 .DS_Store
 Thumbs.db

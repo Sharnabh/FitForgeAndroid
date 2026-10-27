@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -30,7 +31,7 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "R4C3R/qwen3-8b-heretic:q8_0")
 async def get_active_model_name() -> str:
     target = OLLAMA_MODEL
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(trust_env=False, timeout=5.0) as client:
             resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
             if resp.status_code == 200:
                 available = [m.get("name", "") for m in resp.json().get("models", [])]
@@ -108,7 +109,7 @@ async def health_check():
     ollama_ok = False
     models = []
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(trust_env=False, timeout=5.0) as client:
             resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
             if resp.status_code == 200:
                 ollama_ok = True
@@ -196,35 +197,72 @@ async def stream_ollama_response(req: ChatRequest) -> AsyncGenerator[str, None]:
     payload = {
         "model": active_model,
         "messages": messages,
-        "stream": True
+        "stream": True,
+        "options": {
+            "num_thread": 6,
+            "temperature": 0.7,
+            "num_predict": 512,
+        }
     }
 
     full_response_text = ""
 
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream("POST", f"{OLLAMA_BASE_URL}/api/chat", json=payload) as response:
-                if response.status_code != 200:
-                    yield f"event: error\ndata: {json.dumps({'error': 'Ollama error: ' + str(response.status_code)})}\n\n"
-                    return
+    # Immediately yield an initial SSE ping so HTTP 200 headers are sent instantly
+    # to the Android app without waiting for Ollama prompt evaluation or cold load
+    yield "event: ping\ndata: {}\n\n"
 
-                async for line in response.aiter_lines():
-                    if not line:
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                        content = chunk.get("message", {}).get("content", "")
-                        if content:
-                            full_response_text += content
-                            # Send SSE text delta
-                            yield f"event: text\ndata: {json.dumps({'delta': content})}\n\n"
-                        if chunk.get("done", False):
-                            break
-                    except Exception:
-                        pass
-    except Exception as e:
-        yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
-        return
+    queue = asyncio.Queue()
+
+    async def fetch_ollama():
+        try:
+            timeout = httpx.Timeout(connect=30.0, read=300.0, write=60.0, pool=60.0)
+            async with httpx.AsyncClient(trust_env=False, timeout=timeout) as client:
+                async with client.stream("POST", f"{OLLAMA_BASE_URL}/api/chat", json=payload) as response:
+                    if response.status_code != 200:
+                        await queue.put(("error", f"Ollama error: {response.status_code}"))
+                        return
+
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                            msg = chunk.get("message", {})
+                            content = msg.get("content", "")
+                            thinking = msg.get("thinking", "")
+                            token_delta = thinking if thinking else content
+                            if token_delta:
+                                await queue.put(("text", token_delta))
+                            if chunk.get("done", False):
+                                break
+                        except Exception:
+                            pass
+        except Exception as e:
+            await queue.put(("error", str(e)))
+        finally:
+            await queue.put(("done", None))
+
+    fetch_task = asyncio.create_task(fetch_ollama())
+
+    try:
+        while True:
+            try:
+                # Wait up to 4 seconds for next token; if none yet, send heartbeat ping
+                event_type, data = await asyncio.wait_for(queue.get(), timeout=4.0)
+                if event_type == "text":
+                    full_response_text += data
+                    yield f"event: text\ndata: {json.dumps({'delta': data})}\n\n"
+                elif event_type == "error":
+                    yield f"event: error\ndata: {json.dumps({'error': data})}\n\n"
+                    return
+                elif event_type == "done":
+                    break
+            except asyncio.TimeoutError:
+                # Periodic keepalive ping to prevent any client or network socket read timeout
+                yield "event: ping\ndata: {}\n\n"
+    finally:
+        if not fetch_task.done():
+            fetch_task.cancel()
 
     # Post-process full response for proposals
     detected_proposals = parse_proposals_from_text(full_response_text)
@@ -239,7 +277,13 @@ async def chat_with_coach(req: ChatRequest, token: str = Depends(verify_device_t
     """Streams Ishita's response as Server-Sent Events (SSE)."""
     return StreamingResponse(
         stream_ollama_response(req),
-        media_type="text/event-stream"
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "X-Accel-Buffering": "no"
+        }
     )
 
 # -------------------------------------------------------------

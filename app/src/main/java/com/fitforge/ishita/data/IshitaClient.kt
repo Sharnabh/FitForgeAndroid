@@ -36,6 +36,7 @@ data class ProposedAction(
 )
 
 sealed interface IshitaEvent {
+    data object Connected : IshitaEvent
     data class TextDelta(val delta: String) : IshitaEvent
     data class ProposalReceived(val proposal: ProposedAction) : IshitaEvent
     data class Error(val message: String) : IshitaEvent
@@ -185,8 +186,11 @@ class IshitaClient(context: Context) {
             conn.setRequestProperty("Authorization", "Bearer $token")
             conn.setRequestProperty("Content-Type", "application/json")
             conn.setRequestProperty("Accept", "text/event-stream")
-            conn.connectTimeout = 10000
-            conn.readTimeout = 120000
+            conn.setRequestProperty("Accept-Encoding", "identity")
+            conn.setRequestProperty("Cache-Control", "no-cache")
+            conn.setRequestProperty("Connection", "keep-alive")
+            conn.connectTimeout = 30000
+            conn.readTimeout = 300000
             conn.doOutput = true
 
             // Build request payload
@@ -255,16 +259,21 @@ class IshitaClient(context: Context) {
                     currentEvent = line.substring(6).trim()
                 } else if (line.startsWith("data:")) {
                     val data = line.substring(5).trim()
-                    if (data.isNotBlank()) {
-                        when (currentEvent) {
-                            "text" -> {
+                    when (currentEvent) {
+                        "ping" -> {
+                            emit(IshitaEvent.Connected)
+                        }
+                        "text" -> {
+                            if (data.isNotBlank()) {
                                 val obj = JSONObject(data)
                                 val delta = obj.optString("delta", "")
                                 if (delta.isNotEmpty()) {
                                     emit(IshitaEvent.TextDelta(delta))
                                 }
                             }
-                            "proposal" -> {
+                        }
+                        "proposal" -> {
+                            if (data.isNotBlank()) {
                                 val obj = JSONObject(data)
                                 val action = ProposedAction(
                                     id = obj.getString("id"),
@@ -275,14 +284,17 @@ class IshitaClient(context: Context) {
                                 )
                                 emit(IshitaEvent.ProposalReceived(action))
                             }
-                            "error" -> {
+                        }
+                        "error" -> {
+                            val errText = if (data.isNotBlank()) {
                                 val obj = JSONObject(data)
-                                emit(IshitaEvent.Error(obj.optString("error", "Unknown server error")))
-                            }
-                            "done" -> {
-                                emit(IshitaEvent.Done)
-                                break
-                            }
+                                obj.optString("error", "Unknown server error")
+                            } else "Unknown server error"
+                            emit(IshitaEvent.Error(errText))
+                        }
+                        "done" -> {
+                            emit(IshitaEvent.Done)
+                            break
                         }
                     }
                 }
