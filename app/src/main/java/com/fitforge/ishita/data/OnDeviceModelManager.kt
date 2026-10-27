@@ -72,10 +72,7 @@ class OnDeviceModelManager(private val context: Context) {
                 conn.connect()
 
                 val responseCode = conn.responseCode
-                if (responseCode == HttpURLConnection.HTTP_MOVED_PERM ||
-                    responseCode == HttpURLConnection.HTTP_MOVED_TEMP ||
-                    responseCode == 307 || responseCode == 308
-                ) {
+                if (responseCode in 300..399) {
                     val location = conn.getHeaderField("Location")
                     conn.disconnect()
                     if (location != null) {
