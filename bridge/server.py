@@ -25,7 +25,27 @@ from models import (
 from prompts import ISHITA_SYSTEM_PROMPT, format_context_prompt
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "R4C3R/qwen3-8b-heretic")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "R4C3R/qwen3-8b-heretic:q8_0")
+
+async def get_active_model_name() -> str:
+    target = OLLAMA_MODEL
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            if resp.status_code == 200:
+                available = [m.get("name", "") for m in resp.json().get("models", [])]
+                if target in available:
+                    return target
+                # Try matching by prefix (e.g. without tag)
+                base_name = target.split(":")[0]
+                prefix_match = next((m for m in available if m.startswith(base_name)), None)
+                if prefix_match:
+                    return prefix_match
+                if available:
+                    return available[0]
+    except Exception:
+        pass
+    return target
 
 app = FastAPI(title="FitForge Ishita Local Accountability Bridge", version="2.0.0")
 
@@ -97,10 +117,11 @@ async def health_check():
     except Exception:
         pass
 
+    active_model = await get_active_model_name()
     return {
         "status": "healthy" if ollama_ok else "degraded",
         "ollamaConnected": ollama_ok,
-        "activeModel": OLLAMA_MODEL,
+        "activeModel": active_model,
         "availableModels": models
     }
 
@@ -171,8 +192,9 @@ async def stream_ollama_response(req: ChatRequest) -> AsyncGenerator[str, None]:
         messages.append({"role": h.role, "content": h.content})
     messages.append({"role": "user", "content": req.message})
 
+    active_model = await get_active_model_name()
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": active_model,
         "messages": messages,
         "stream": True
     }
