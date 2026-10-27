@@ -57,6 +57,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -75,21 +77,67 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
+enum class CoachEngine {
+    ChatGPT,
+    Ishita
+}
+
 // -------------------------------------------------------------
 // AI COACH SCREEN (Sign in with ChatGPT / SIWC)
 // -------------------------------------------------------------
 @Composable
 fun CoachScreen(vm: FitForgeViewModel, onBack: (() -> Unit)? = null) {
-    val session = vm.chatGptSession
-    val latestBody by vm.latestBody.collectAsState()
-    var inputMessage by remember { mutableStateOf("") }
-    val keyboardController = LocalSoftwareKeyboardController.current
+    var selectedEngine by remember { mutableStateOf(CoachEngine.ChatGPT) }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .padding(16.dp)
-    ) {
+    Column(Modifier.fillMaxSize()) {
+        // Engine Selector
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            TabRow(
+                selectedTabIndex = if (selectedEngine == CoachEngine.ChatGPT) 0 else 1,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.primary
+            ) {
+                Tab(
+                    selected = selectedEngine == CoachEngine.ChatGPT,
+                    onClick = { selectedEngine = CoachEngine.ChatGPT },
+                    text = {
+                        Text(
+                            "Cloud (ChatGPT)",
+                            fontWeight = if (selectedEngine == CoachEngine.ChatGPT) FontWeight.Bold else FontWeight.Normal
+                        )
+                    },
+                    icon = { Icon(Icons.Default.ChatBubbleOutline, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                )
+                Tab(
+                    selected = selectedEngine == CoachEngine.Ishita,
+                    onClick = { selectedEngine = CoachEngine.Ishita },
+                    text = {
+                        Text(
+                            "Local (Ishita)",
+                            fontWeight = if (selectedEngine == CoachEngine.Ishita) FontWeight.Bold else FontWeight.Normal
+                        )
+                    },
+                    icon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                )
+            }
+        }
+
+        if (selectedEngine == CoachEngine.Ishita) {
+            com.fitforge.ishita.ui.IshitaScreen(vm = vm, onBack = onBack)
+        } else {
+            val session = vm.chatGptSession
+            val latestBody by vm.latestBody.collectAsState()
+            var inputMessage by remember { mutableStateOf("") }
+            val keyboardController = LocalSoftwareKeyboardController.current
+
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+            ) {
         // Top Header
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -563,6 +611,8 @@ fun CoachScreen(vm: FitForgeViewModel, onBack: (() -> Unit)? = null) {
             }
         }
     }
+    }
+}
 
     if (vm.showAiConsentDialog) {
         AiCoachConsentDialog(
