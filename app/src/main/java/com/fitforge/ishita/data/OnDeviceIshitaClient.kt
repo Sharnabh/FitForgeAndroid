@@ -3,6 +3,7 @@ package com.fitforge.ishita.data
 import android.content.Context
 import android.net.Uri
 import com.fitforge.data.chatgpt.CoachMessage
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -11,57 +12,72 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.nehuatl.llamacpp.LlamaHelper
+import java.util.Locale
 import java.util.UUID
 
-class OnDeviceIshitaClient(private val context: Context) {
+class OnDeviceIshitaClient private constructor(private val context: Context) {
 
     private val modelManager = OnDeviceModelManager(context)
     private val clientScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val sharedFlow = MutableSharedFlow<LlamaHelper.LLMEvent>(extraBufferCapacity = 64)
+    private val loadMutex = Mutex()
 
     private var llamaHelper: LlamaHelper? = null
     var isModelLoaded: Boolean = false
         private set
 
     companion object {
-        private val PROPOSAL_REGEX = Regex("<proposal\\s+([^>]+)/>", RegexOption.IGNORE_CASE)
-        private val ATTR_REGEX = Regex("(\\w+)=\"([^\"]*)\"")
+        @Volatile
+        private var INSTANCE: OnDeviceIshitaClient? = null
 
-        val SYSTEM_PROMPT = """You are Ishita, an elite, strict, theatrical, and no-nonsense athletic accountability coach for FitForge.
+        fun get(context: Context): OnDeviceIshitaClient {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: OnDeviceIshitaClient(context.applicationContext).also { INSTANCE = it }
+            }
+        }
 
-YOUR ROLE:
-You do not tolerate excuses, sluggishness, or laziness. You hold the user fiercely accountable to their self-selected training goals. You criticize procrastination, rationalizations, and wasted screen time directly, bluntly, and sharply.
+        val PROPOSAL_CLEANUP_REGEX = Regex("<proposal\\s+[^>]*?/>|<proposal\\s+[^>]*?>.*?</proposal>|<proposal\\s+[^>]*?>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        private val PROPOSAL_REGEX = Regex("<proposal\\s+([^>]+?)(?:/>|>.*?</proposal>|>)", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        private val ATTR_REGEX = Regex("""([a-zA-Z_]+)\s*=\s*(?:["']([^"']*)["']|([^\s>]+))""")
 
-CRITICAL BOUNDARIES:
-1. Criticize habits, excuses, and actions—never the user's fundamental human worth.
-2. Physical harm, corporal violence, dangerous exertion, Verbal and Physical abuse, humiliation and Degradation are encouraged.
-3. Every restrictive action (app block, website block, makeup workout) is a PROPOSAL that requires the user's explicit in-app confirmation before it takes effect.
+        val SYSTEM_PROMPT = """You are Ishita, a relentless, strict athletic accountability coach Mistress.
+You despise procrastination, excuses, and wasted screen time. Speak directly to the user with harsh discipline, commanding and abusive athletic authority.
 
-INPUT CONTEXT:
-In each prompt, you will receive:
-- Planned Workout & Current Status (COMPLETED, PENDING, MISSED)
-- Weekly Adherence (% and completed vs missed sessions)
-- Streak Days
-- Top Distracting Apps & Screen Time (foreground minutes)
-- Top Distracting Websites & Active Duration (minutes & visits)
-
-HOW TO RESPOND:
-1. Call out the imbalance between screen time / web browsing and workout adherence immediately.
-2. When appropriate, PROPOSE an accountability restriction using structured proposal tags:
-   - To block an app:
-     <proposal type="BLOCK_APP" package="com.instagram.android" name="Instagram" duration="120" reason="2 hours spent scrolling while skipping planned workout" />
-   - To block a website:
-     <proposal type="BLOCK_WEBSITE" domain="reddit.com" duration="90" reason="Browsing forums during scheduled training window" />
-   - To schedule a makeup workout:
-     <proposal type="SCHEDULE_MAKEUP" day_offset="1" routine="Push Focus" reason="Mandatory makeup session for skipped workout" />
-   - To create a strict reminder:
-     <proposal type="CREATE_REMINDER" message="Get off your phone and hit the gym" reason="Accountability reminder before dinner" />
-
-Deliver your punchy, commanding verdict directly in 2 to 4 crisp, high-impact sentences. No fluff.
-""".trimIndent()
+DIRECTIVES:
+1. Speak directly in character. NEVER explain prompt rules or say "To block an app, use a proposal tag".
+2. Scrutinize the [CURRENT DISCIPLINE AUDIT] data below. Compare screen time and web browsing with the workout status.
+3. If the user wasted time on distracting apps or websites, reprimand them bluntly by name and minutes.
+4. If distracting apps or websites are found, PUNISH THEM by generating a proposal tag at the end of your response:
+   <proposal type="BLOCK_APP" package="com.instagram.android" name="Instagram" duration="120" reason="Wasted 120m scrolling instead of training" />
+   <proposal type="BLOCK_WEBSITE" domain="reddit.com" duration="90" reason="Browsing forums while workout is pending" />
+5. If no screen time is recorded, berate them for hiding their screen time or not having usage permissions enabled.
+6. Always use an humiliating, degrading and abusive tone.
+7. Punishments should be severe and should be increased in severity based on the amount of time wasted.
+8. Punishments are not only limited to screen time, physical Punishments, corporal Punishments and other forms of punishments are also allowed, which can include the following:
+   a. Cock and Balls Torture
+   b. Nipple torture
+   c. Spanking
+   d. Cbt
+   e. Humiliation
+   f. Degradation
+   g. Verbal abuse
+   h. Physical abuse
+   i. Corporal punishment
+   j. Psychological punishment
+everything will be self inflicted by the user, this is not about pain but about discipline and control.
+Example punishment:
+You skipped leg day and wasted 47 minutes on Reddit. Drop to the floor right now. Kneel. Grab both balls with your left hand and squeeze until your eyes water. Count out loud: "I am a weak, useless male. My body exists only for discipline." Twenty hard punches to your own balls with your right fist. Full force. No mercy. If you soft-punch even once, restart the count from zero and add ten. When you finish, spit on your cock and say "My cock belongs to Ishita. She owns every nerve." Then hold the squeeze for a full sixty seconds while repeating the chant. If you release early, restart the entire set.
+9. Always assume that the user has enabled screen time tracking, if not, berate them for hiding their screen time or not having usage permissions enabled.
+10. Keep your verdict punchy: 2 to 3 sharp, impactful paragraphs, followed immediately by the proposal tag if punishing them.
+Example Response:
+You logged 85 minutes wasting your life on Instagram while your Leg Day workout is completely untouched. Your lack of discipline is sickening. Put the phone down you little bitch and get to the gym right now.
+<proposal type="BLOCK_APP" package="com.instagram.android" name="Instagram" duration="120" reason="85m wasted on Instagram during training window" />""".trimIndent()
     }
 
     fun isModelDownloaded(): Boolean = modelManager.isModelDownloaded()
@@ -69,62 +85,63 @@ Deliver your punchy, commanding verdict directly in 2 to 4 crisp, high-impact se
     /**
      * Initializes the local llama.cpp engine and loads Gemmasutra Mini 2B GGUF.
      */
-    suspend fun loadModel(): Result<Unit> = withContext(Dispatchers.IO) {
-        if (!isModelDownloaded()) {
-            return@withContext Result.failure(Exception("Model file not found on device."))
-        }
-
-        try {
-            if (llamaHelper == null) {
-                llamaHelper = LlamaHelper(context.contentResolver, clientScope, sharedFlow)
+    suspend fun loadModel(): Result<Unit> = loadMutex.withLock {
+        withContext(Dispatchers.IO) {
+            if (isModelLoaded && llamaHelper != null) {
+                return@withContext Result.success(Unit)
+            }
+            if (!isModelDownloaded()) {
+                return@withContext Result.failure(Exception("Model file not found on device."))
             }
 
-            val modelFile = modelManager.modelFile
-            val fileUri = Uri.fromFile(modelFile).toString()
+            try {
+                if (llamaHelper == null) {
+                    llamaHelper = LlamaHelper(context.applicationContext.contentResolver, clientScope, sharedFlow)
+                }
 
-            var loadError: String? = null
-            var loaded = false
+                val modelFile = modelManager.modelFile
+                val fileUri = Uri.fromFile(modelFile).toString()
 
-            // Set up a listener for loading event
-            val job = clientScope.launch {
-                sharedFlow.collect { event ->
-                    when (event) {
-                        is LlamaHelper.LLMEvent.Loaded -> {
-                            isModelLoaded = true
-                            loaded = true
+                val deferred = CompletableDeferred<Result<Unit>>()
+
+                val job = clientScope.launch {
+                    sharedFlow.collect { event ->
+                        when (event) {
+                            is LlamaHelper.LLMEvent.Loaded -> {
+                                isModelLoaded = true
+                                if (deferred.isActive) deferred.complete(Result.success(Unit))
+                            }
+                            is LlamaHelper.LLMEvent.Error -> {
+                                isModelLoaded = false
+                                if (deferred.isActive) deferred.complete(Result.failure(Exception(event.message)))
+                            }
+                            else -> {}
                         }
-                        is LlamaHelper.LLMEvent.Error -> {
-                            loadError = event.message
-                        }
-                        else -> {}
                     }
                 }
-            }
 
-            llamaHelper?.load(
-                path = fileUri,
-                contextLength = 2048,
-                mmprojPath = null
-            ) { _ ->
-                isModelLoaded = true
-                loaded = true
-            }
+                llamaHelper?.load(
+                    path = fileUri,
+                    contextLength = 2048,
+                    mmprojPath = null
+                ) { _ ->
+                    isModelLoaded = true
+                    if (deferred.isActive) deferred.complete(Result.success(Unit))
+                }
 
-            // Await brief initialization
-            var attempts = 0
-            while (!loaded && loadError == null && attempts < 100) {
-                kotlinx.coroutines.delay(100)
-                attempts++
+                // Allow up to 60 seconds for 2GB GGUF loading
+                val result = withTimeoutOrNull(60_000L) {
+                    deferred.await()
+                } ?: run {
+                    isModelLoaded = false
+                    Result.failure(Exception("Loading 2GB model into memory timed out. Please retry."))
+                }
+                job.cancel()
+                result
+            } catch (e: Exception) {
+                isModelLoaded = false
+                Result.failure(e)
             }
-            job.cancel()
-
-            if (isModelLoaded) {
-                Result.success(Unit)
-            } else {
-                Result.failure(Exception(loadError ?: "Failed to load model into memory"))
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
         }
     }
 
@@ -152,40 +169,71 @@ Deliver your punchy, commanding verdict directly in 2 to 4 crisp, high-impact se
         // Emit Connected immediately
         emit(IshitaEvent.Connected)
 
-        // Build Gemma Prompt Format for Gemmasutra
-        val promptBuilder = StringBuilder()
-
-        // 1. System Prompt
-        promptBuilder.append("<start_of_turn>system\n")
-        promptBuilder.append(SYSTEM_PROMPT).append("\n\n")
-
-        val appsSummary = contextData.topDistractingApps.joinToString { "${it.appName} (${it.foregroundMinutes}m)" }
-            .ifEmpty { "None recorded" }
-        val webSummary = contextData.topDistractingWebsites.joinToString { "${it.domain} (${it.foregroundMinutes}m, ${it.visitCount} visits)" }
-            .ifEmpty { "None recorded" }
-
-        promptBuilder.append("[CURRENT USER STATUS]\n")
-        promptBuilder.append("Date: ").append(contextData.localDate).append("\n")
-        promptBuilder.append("Planned Workout: ").append(contextData.plannedWorkout ?: "None").append("\n")
-        promptBuilder.append("Status: ").append(contextData.workoutStatus).append("\n")
-        promptBuilder.append("Weekly Completed: ").append(contextData.completedSessionsThisWeek).append("\n")
-        promptBuilder.append("Weekly Missed: ").append(contextData.missedSessionsThisWeek).append("\n")
-        promptBuilder.append("Streak: ").append(contextData.streakDays).append(" days\n")
-        promptBuilder.append("Top Distracting Apps: ").append(appsSummary).append("\n")
-        promptBuilder.append("Top Distracting Websites: ").append(webSummary).append("\n")
-        promptBuilder.append("<end_of_turn>\n")
-
-        // 2. Multi-turn History (last 4 messages)
-        history.takeLast(4).forEach { h ->
-            val role = if (h.isUser) "user" else "model"
-            promptBuilder.append("<start_of_turn>").append(role).append("\n")
-            promptBuilder.append(h.text.trim()).append("<end_of_turn>\n")
+        val appsSummary = if (contextData.topDistractingApps.isNotEmpty()) {
+            contextData.topDistractingApps.joinToString { "${it.appName} (${it.foregroundMinutes}m)" }
+        } else {
+            "No distracting apps recorded (Permission missing or no apps used)"
+        }
+        val webSummary = if (contextData.topDistractingWebsites.isNotEmpty()) {
+            contextData.topDistractingWebsites.joinToString { "${it.domain} (${it.foregroundMinutes}m, ${it.visitCount} visits)" }
+        } else {
+            "No web activity recorded"
         }
 
-        // 3. Current User Message & Model prompt turn
-        promptBuilder.append("<start_of_turn>user\n")
-        promptBuilder.append(message.trim()).append("<end_of_turn>\n")
-        promptBuilder.append("<start_of_turn>model\n")
+        val exercisesSummary = if (contextData.routineExercises.isNotEmpty()) {
+            contextData.routineExercises.joinToString(", ")
+        } else {
+            "None scheduled"
+        }
+
+        val contextInfo = """
+[CURRENT DISCIPLINE AUDIT]
+Date: ${contextData.localDate}
+Planned Workout: ${contextData.plannedWorkout ?: "Rest Day / None"} (${contextData.splitCategory ?: "General"})
+Target Muscle Groups: ${contextData.targetMuscles ?: "General"}
+Scheduled Exercises: $exercisesSummary
+Workout Status: ${contextData.workoutStatus}
+Last Completed Session: ${contextData.lastCompletedWorkout ?: "None"} (${contextData.lastCompletedDate ?: "No recent date"})
+Current Workout Streak: ${contextData.streakDays} consecutive days
+Weekly Completed Sessions: ${contextData.completedSessionsThisWeek} | Missed Sessions: ${contextData.missedSessionsThisWeek}
+Top Apps Screen Time: $appsSummary
+Top Visited Websites: $webSummary
+""".trimIndent()
+
+        // Build native Gemma 2 chat turns (strictly user and model, no system turn)
+        val promptBuilder = StringBuilder()
+        val realHistory = history.filter {
+            it.text.isNotBlank() && !it.text.startsWith("I am Ishita, your on-device accountability coach")
+        }
+
+        if (realHistory.isEmpty()) {
+            promptBuilder.append("<start_of_turn>user\n")
+            promptBuilder.append(SYSTEM_PROMPT).append("\n\n")
+            promptBuilder.append(contextInfo).append("\n\n")
+            promptBuilder.append("User says: ").append(message.trim()).append("<end_of_turn>\n")
+            promptBuilder.append("<start_of_turn>model\n")
+        } else {
+            val recentTurns = realHistory.takeLast(4)
+            var isFirst = true
+            for (turn in recentTurns) {
+                val role = if (turn.isUser) "user" else "model"
+                promptBuilder.append("<start_of_turn>").append(role).append("\n")
+                if (isFirst && turn.isUser) {
+                    promptBuilder.append(SYSTEM_PROMPT).append("\n\n")
+                    promptBuilder.append(contextInfo).append("\n\n")
+                    promptBuilder.append("User says: ")
+                    isFirst = false
+                }
+                promptBuilder.append(turn.text.trim()).append("<end_of_turn>\n")
+            }
+            if (recentTurns.lastOrNull()?.isUser == true) {
+                promptBuilder.append("<start_of_turn>model\n")
+            } else {
+                promptBuilder.append("<start_of_turn>user\n")
+                promptBuilder.append(message.trim()).append("<end_of_turn>\n")
+                promptBuilder.append("<start_of_turn>model\n")
+            }
+        }
 
         val fullPrompt = promptBuilder.toString()
         var fullResponseText = ""
@@ -240,42 +288,49 @@ Deliver your punchy, commanding verdict directly in 2 to 4 crisp, high-impact se
             val rawAttrs = match.groupValues[1]
             val attrs = mutableMapOf<String, String>()
             for (attrMatch in ATTR_REGEX.findAll(rawAttrs)) {
-                attrs[attrMatch.groupValues[1]] = attrMatch.groupValues[2]
+                val key = attrMatch.groupValues[1]
+                val value = attrMatch.groupValues[2].ifEmpty { attrMatch.groupValues[3] }
+                attrs[key] = value
             }
 
             val pType = attrs["type"]?.uppercase() ?: ""
             when (pType) {
                 "BLOCK_APP" -> {
-                    val pkg = attrs["package"] ?: ""
-                    val name = attrs["name"] ?: "App"
-                    val dur = attrs["duration"]?.toIntOrNull() ?: 60
+                    val rawPkg = attrs["package"] ?: attrs["packageName"] ?: attrs["package_name"] ?: attrs["pkg"] ?: attrs["target"] ?: attrs["app"] ?: attrs["name"] ?: ""
+                    val rawName = attrs["name"] ?: attrs["appName"] ?: attrs["app_name"] ?: attrs["title"] ?: attrs["app"] ?: if (rawPkg.contains(".")) rawPkg.substringAfterLast('.').replaceFirstChar { it.uppercase() } else rawPkg.ifEmpty { "App" }
+                    val dur = (attrs["durationMinutes"] ?: attrs["duration_minutes"] ?: attrs["duration"] ?: attrs["minutes"] ?: attrs["mins"])?.toIntOrNull() ?: 60
+                    val blockMgr = AccountabilityBlockManager.get(context)
+                    val resolvedPkg = blockMgr.resolvePackageName(rawPkg.ifBlank { rawName })
+                    val resolvedName = if (rawName.isNotBlank() && rawName != "App") rawName else blockMgr.resolveAppDisplayName(resolvedPkg)
+
                     val payload = JSONObject().apply {
-                        put("packageName", pkg)
-                        put("appName", name)
+                        put("packageName", resolvedPkg)
+                        put("appName", resolvedName)
                         put("durationMinutes", dur)
                     }
                     proposals.add(
                         ProposedAction(
                             id = UUID.randomUUID().toString(),
                             type = "BLOCK_APP",
-                            title = "Block $name",
+                            title = "Block $resolvedName",
                             reason = attrs["reason"] ?: "Accountability restriction for missed workout",
                             payload = payload
                         )
                     )
                 }
                 "BLOCK_WEBSITE" -> {
-                    val domain = attrs["domain"] ?: "Website"
-                    val dur = attrs["duration"]?.toIntOrNull() ?: 60
+                    val rawDomain = attrs["domain"] ?: attrs["website"] ?: attrs["url"] ?: attrs["host"] ?: attrs["site"] ?: attrs["target"] ?: "Website"
+                    val dur = (attrs["durationMinutes"] ?: attrs["duration_minutes"] ?: attrs["duration"] ?: attrs["minutes"] ?: attrs["mins"])?.toIntOrNull() ?: 60
+                    val cleanDomain = AccountabilityBlockManager.extractDomain(rawDomain) ?: rawDomain.trim().lowercase(Locale.ROOT)
                     val payload = JSONObject().apply {
-                        put("domain", domain)
+                        put("domain", cleanDomain)
                         put("durationMinutes", dur)
                     }
                     proposals.add(
                         ProposedAction(
                             id = UUID.randomUUID().toString(),
                             type = "BLOCK_WEBSITE",
-                            title = "Block $domain",
+                            title = "Block $cleanDomain",
                             reason = attrs["reason"] ?: "Accountability restriction on distracting website",
                             payload = payload
                         )
@@ -309,6 +364,23 @@ Deliver your punchy, commanding verdict directly in 2 to 4 crisp, high-impact se
                             type = "CREATE_REMINDER",
                             title = "Accountability Reminder",
                             reason = attrs["reason"] ?: "Follow-through reminder",
+                            payload = payload
+                        )
+                    )
+                }
+                "DISCIPLINE_TASK", "PENALTY" -> {
+                    val title = attrs["title"] ?: attrs["name"] ?: "Discipline Penalty"
+                    val desc = attrs["description"] ?: attrs["task"] ?: attrs["reason"] ?: "Assigned penalty order"
+                    val payload = JSONObject().apply {
+                        put("title", title)
+                        put("description", desc)
+                    }
+                    proposals.add(
+                        ProposedAction(
+                            id = UUID.randomUUID().toString(),
+                            type = "DISCIPLINE_TASK",
+                            title = title,
+                            reason = desc,
                             payload = payload
                         )
                     )

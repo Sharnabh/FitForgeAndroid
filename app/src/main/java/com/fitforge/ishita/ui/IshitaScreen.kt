@@ -83,22 +83,34 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material.icons.filled.Gavel
 import com.fitforge.FitForgeThemeColors
 import com.fitforge.FitForgeViewModel
+import com.fitforge.MarkdownText
 import com.fitforge.data.chatgpt.CoachMessage
 import com.fitforge.ishita.data.AccountabilityBlockManager
 import com.fitforge.ishita.data.AccountabilityContextDto
+import com.fitforge.ishita.data.AccountabilityPenalty
 import com.fitforge.ishita.data.ActiveBlock
 import com.fitforge.ishita.data.AppUsageDto
 import com.fitforge.ishita.data.AppUsageStat
+import com.fitforge.ishita.data.IshitaChatManager
 import com.fitforge.ishita.data.IshitaEvent
 import com.fitforge.ishita.data.OnDeviceIshitaClient
 import com.fitforge.ishita.data.OnDeviceModelManager
+import com.fitforge.ishita.data.PenaltyStatus
 import com.fitforge.ishita.data.ProposedAction
 import com.fitforge.ishita.data.UsageStatsRepository
 import com.fitforge.ishita.data.WebsiteUsageDto
 import com.fitforge.ishita.data.WebsiteUsageStat
+import com.fitforge.ishita.service.FitForgeAccountabilityAccessibilityService
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.time.LocalDate
 
 @Composable
@@ -109,7 +121,7 @@ fun IshitaScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val modelManager = remember { OnDeviceModelManager(context) }
-    val client = remember { OnDeviceIshitaClient(context) }
+    val client = remember { OnDeviceIshitaClient.get(context) }
     val usageRepo = remember { UsageStatsRepository(context) }
     val blockManager = remember { AccountabilityBlockManager.get(context) }
 
@@ -119,27 +131,29 @@ fun IshitaScreen(
     var downloadProgress by remember { mutableStateOf(0f) }
     var downloadStatusText by remember { mutableStateOf("") }
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showPenaltiesScreen by remember { mutableStateOf(false) }
 
     // Screen & web time
     var hasUsagePermission by remember { mutableStateOf(usageRepo.hasUsagePermission()) }
+    var hasAccessibilityPermission by remember { mutableStateOf(FitForgeAccountabilityAccessibilityService.isAccessibilityServiceEnabled(context)) }
     var appUsageStats by remember { mutableStateOf<List<AppUsageStat>>(emptyList()) }
     var webUsageStats by remember { mutableStateOf<List<WebsiteUsageStat>>(emptyList()) }
     val activeBlocks by blockManager.activeBlocksFlow.collectAsState()
 
-    // Chat timeline & proposals
-    val messages = remember {
-        mutableStateListOf(
-            CoachMessage(
-                isUser = false,
-                text = "I am Ishita, your on-device accountability coach powered by Gemmasutra Mini 2B. Everything runs 100% locally and privately on your phone. I don't tolerate excuses—only discipline and consistency. Did you train today, or did you waste hours staring at screens?"
-            )
-        )
-    }
-    val pendingProposals = remember { mutableStateListOf<ProposedAction>() }
-    var isStreaming by remember { mutableStateOf(false) }
-    var streamingStatus by remember { mutableStateOf("Ishita is analyzing your discipline...") }
+    // Persistent Ishita chat manager & background execution
+    val chatManager = remember { IshitaChatManager.get(context) }
+    val messages by chatManager.messagesFlow.collectAsState()
+    val isStreaming by chatManager.isStreamingFlow.collectAsState()
+    val streamingStatus by chatManager.streamingStatusFlow.collectAsState()
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+
+    DisposableEffect(Unit) {
+        chatManager.isScreenVisible = true
+        onDispose {
+            chatManager.isScreenVisible = false
+        }
+    }
 
     // Auto-scroll as messages update or text streams in
     LaunchedEffect(messages.size, messages.lastOrNull()?.text) {
@@ -151,6 +165,7 @@ fun IshitaScreen(
     // Refresh context data
     fun refreshStats() {
         hasUsagePermission = usageRepo.hasUsagePermission()
+        hasAccessibilityPermission = FitForgeAccountabilityAccessibilityService.isAccessibilityServiceEnabled(context)
         scope.launch {
             if (hasUsagePermission) {
                 appUsageStats = usageRepo.getDailyUsageStats(hoursBack = 24, maxResults = 5)
@@ -161,6 +176,20 @@ fun IshitaScreen(
 
     LaunchedEffect(Unit) {
         refreshStats()
+    }
+
+    // Auto refresh when returning from Android Settings (e.g. after granting usage or accessibility)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshStats()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     // Document picker to import GGUF model directly from device storage
@@ -188,18 +217,10 @@ fun IshitaScreen(
 
     fun sendMessage(textToSend: String) {
         if (textToSend.isBlank() || isStreaming) return
-        val userMsg = CoachMessage(isUser = true, text = textToSend)
-        messages.add(userMsg)
         inputText = ""
 
-        val assistantMsgId = java.util.UUID.randomUUID().toString()
-        val assistantMsg = CoachMessage(id = assistantMsgId, isUser = false, text = "")
-        messages.add(assistantMsg)
-        isStreaming = true
-        streamingStatus = "Running on-device inference (Gemmasutra 2B)..."
-
         scope.launch {
-            // Build current accountability context
+            // Build current accountability context with rich workout and streak details
             val schedules = vm.weeklySchedule.value
             val sessions = vm.workoutSessions.value
             val todayDate = LocalDate.now()
@@ -207,9 +228,29 @@ fun IshitaScreen(
             val todaySession = vm.todaySession.value
             val workoutStatus = if (todaySession?.completed == true) "COMPLETED" else if (todaySession != null) "IN_PROGRESS" else "PENDING"
 
+            val todayDayOfWeek = todayDate.dayOfWeek.value
+            val todaySchedule = schedules.firstOrNull { it.dayOfWeek == todayDayOfWeek }
+            val scheduledRoutine = vm.workoutRoutines.value.firstOrNull { it.id == todaySchedule?.routineId }
+
+            val lastCompletedSession = sessions.filter { it.completed }.maxByOrNull { it.date }
+
+            val routineId = scheduledRoutine?.id
+            val routineExercisesList = mutableListOf<String>()
+            if (routineId != null) {
+                try {
+                    val routineExs = vm.getRoutineExercises(routineId)
+                    routineExercisesList.addAll(routineExs.map { "${it.exerciseName} (${it.targetSets}x${it.targetRepsMin}-${it.targetRepsMax})" })
+                } catch (_: Exception) {}
+            }
+
             val accContext = AccountabilityContextDto(
                 localDate = todayDate.toString(),
-                plannedWorkout = todaySession?.dayName,
+                plannedWorkout = scheduledRoutine?.name ?: todaySession?.dayName ?: todaySchedule?.routineName ?: "Rest Day",
+                splitCategory = scheduledRoutine?.splitCategory ?: "General",
+                targetMuscles = scheduledRoutine?.splitCategory,
+                routineExercises = routineExercisesList,
+                lastCompletedDate = lastCompletedSession?.date,
+                lastCompletedWorkout = lastCompletedSession?.dayName,
                 workoutStatus = workoutStatus,
                 completedSessionsThisWeek = consistency.completedCount,
                 missedSessionsThisWeek = (consistency.scheduledCount - consistency.completedCount).coerceAtLeast(0),
@@ -222,40 +263,13 @@ fun IshitaScreen(
                 }
             )
 
-            var accumulatedText = ""
-            val hist = if (messages.size >= 2) messages.dropLast(2) else emptyList()
-
-            client.streamChat(textToSend, accContext, hist).collect { event ->
-                when (event) {
-                    is IshitaEvent.Connected -> {
-                        streamingStatus = "Model loaded • Generating verdict..."
-                    }
-                    is IshitaEvent.TextDelta -> {
-                        accumulatedText += event.delta
-                        streamingStatus = "Ishita is responding..."
-                        val idx = messages.indexOfFirst { it.id == assistantMsgId }
-                        if (idx != -1) {
-                            messages[idx] = messages[idx].copy(text = accumulatedText)
-                        }
-                    }
-                    is IshitaEvent.ProposalReceived -> {
-                        pendingProposals.add(event.proposal)
-                    }
-                    is IshitaEvent.Error -> {
-                        val idx = messages.indexOfFirst { it.id == assistantMsgId }
-                        if (idx != -1) {
-                            val currentText = messages[idx].text
-                            val errNote = if (currentText.isBlank()) "[Error: ${event.message}]" else "$currentText\n[Error: ${event.message}]"
-                            messages[idx] = messages[idx].copy(text = errNote)
-                        }
-                    }
-                    is IshitaEvent.Done -> {
-                        isStreaming = false
-                    }
-                }
-            }
-            isStreaming = false
+            chatManager.sendMessage(textToSend, accContext)
         }
+    }
+
+    if (showPenaltiesScreen) {
+        PenaltiesScreen(onBack = { showPenaltiesScreen = false })
+        return
     }
 
     Column(
@@ -299,7 +313,26 @@ fun IshitaScreen(
                 }
             }
 
-            Row {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val penalties by blockManager.penaltiesFlow.collectAsState()
+                val pendingOrdersCount = penalties.count { it.status == PenaltyStatus.PENDING }
+                IconButton(onClick = { showPenaltiesScreen = true }) {
+                    BadgedBox(
+                        badge = {
+                            if (pendingOrdersCount > 0) {
+                                Badge(containerColor = FitForgeThemeColors.Secondary) {
+                                    Text(pendingOrdersCount.toString())
+                                }
+                            }
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.Gavel,
+                            contentDescription = "Penalties",
+                            tint = FitForgeThemeColors.Secondary
+                        )
+                    }
+                }
                 IconButton(onClick = { refreshStats() }) {
                     Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                 }
@@ -380,6 +413,44 @@ fun IshitaScreen(
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Text("Grant", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        // ACCESSIBILITY SERVICE PERMISSION WARNING BANNER
+        if (!hasAccessibilityPermission) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = FitForgeThemeColors.Secondary.copy(alpha = 0.15f)),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+            ) {
+                Row(
+                    Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Accessibility Service Required",
+                            fontWeight = FontWeight.Bold,
+                            color = FitForgeThemeColors.Secondary,
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                        Text(
+                            "Enable FitForge in Accessibility settings to track web domains and enforce app/site blocks.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            context.startActivity(FitForgeAccountabilityAccessibilityService.createSettingsIntent())
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = FitForgeThemeColors.Secondary),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("Enable", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -480,40 +551,83 @@ fun IshitaScreen(
             }
         }
 
+        // DISCIPLINE & PENALTIES HUB SHORTCUT BANNER
+        val allPenalties by blockManager.penaltiesFlow.collectAsState()
+        Surface(
+            color = FitForgeThemeColors.Secondary.copy(alpha = 0.12f),
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp)
+                .clickable { showPenaltiesScreen = true }
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Gavel,
+                        contentDescription = null,
+                        tint = FitForgeThemeColors.Secondary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "Discipline & Penalties Hub",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = FitForgeThemeColors.Secondary
+                    )
+                }
+                Text(
+                    "View All (${allPenalties.size}) →",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
         // PENDING PROPOSAL CARDS
-        if (pendingProposals.isNotEmpty()) {
+        val pendingPenalties = allPenalties.filter { it.status == PenaltyStatus.PENDING }
+        if (pendingPenalties.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 6.dp)) {
-                pendingProposals.toList().forEach { proposal ->
+                pendingPenalties.forEach { penalty ->
+                    val proposal = penalty.toProposedAction()
                     ProposalActionCard(
                         proposal = proposal,
                         onConfirm = {
                             scope.launch {
                                 client.confirmProposal(proposal.id)
+                                if (!hasAccessibilityPermission && (proposal.type == "BLOCK_APP" || proposal.type == "BLOCK_WEBSITE")) {
+                                    Toast.makeText(context, "Enable FitForge Accessibility Service to enforce block!", Toast.LENGTH_LONG).show()
+                                    context.startActivity(FitForgeAccountabilityAccessibilityService.createSettingsIntent())
+                                }
+                                val dur = proposal.payload.optInt("durationMinutes", 60).coerceAtLeast(1)
                                 when (proposal.type) {
                                     "BLOCK_APP" -> {
-                                        val pkg = proposal.payload.optString("packageName", "")
+                                        val pkg = proposal.payload.optString("packageName", "").ifEmpty { proposal.payload.optString("appName", "") }
                                         val name = proposal.payload.optString("appName", pkg)
-                                        val dur = proposal.payload.optInt("durationMinutes", 60)
-                                        if (pkg.isNotBlank()) {
-                                            blockManager.blockApp(pkg, name, dur, proposal.reason)
+                                        if (pkg.isNotBlank() || name.isNotBlank()) {
+                                            blockManager.blockApp(pkg.ifBlank { name }, name, dur, proposal.reason)
                                         }
                                     }
                                     "BLOCK_WEBSITE" -> {
-                                        val domain = proposal.payload.optString("domain", "")
-                                        val dur = proposal.payload.optInt("durationMinutes", 60)
+                                        val domain = proposal.payload.optString("domain", "").ifEmpty { proposal.title.removePrefix("Block ").trim() }
                                         if (domain.isNotBlank()) {
                                             blockManager.blockWebsite(domain, dur, proposal.reason)
                                         }
                                     }
                                 }
-                                pendingProposals.remove(proposal)
-                                Toast.makeText(context, "Action Confirmed & Enforced", Toast.LENGTH_SHORT).show()
+                                blockManager.updatePenaltyStatus(proposal.id, PenaltyStatus.ACTIVE)
+                                Toast.makeText(context, "Action Confirmed & Enforced for ${dur}m", Toast.LENGTH_SHORT).show()
                             }
                         },
                         onReject = {
                             scope.launch {
                                 client.rejectProposal(proposal.id)
-                                pendingProposals.remove(proposal)
+                                blockManager.updatePenaltyStatus(proposal.id, PenaltyStatus.REJECTED)
                             }
                         }
                     )
@@ -605,6 +719,9 @@ fun IshitaScreen(
                 client.release()
                 isModelDownloaded = false
                 showSettingsDialog = false
+            },
+            onClearChat = {
+                chatManager.clearChat()
             },
             onDismiss = { showSettingsDialog = false }
         )
@@ -708,6 +825,7 @@ fun OnDeviceModelSettingsDialog(
     client: OnDeviceIshitaClient,
     onPickLocalFile: () -> Unit,
     onModelDeleted: () -> Unit,
+    onClearChat: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -776,6 +894,18 @@ fun OnDeviceModelSettingsDialog(
 
                 OutlinedButton(
                     onClick = {
+                        onClearChat()
+                        Toast.makeText(context, "Chat history cleared", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Clear Chat History")
+                }
+
+                OutlinedButton(
+                    onClick = {
                         val deleted = modelManager.deleteModel()
                         if (deleted) {
                             Toast.makeText(context, "Model deleted. Storage reclaimed.", Toast.LENGTH_SHORT).show()
@@ -796,6 +926,35 @@ fun OnDeviceModelSettingsDialog(
                 Text("Close")
             }
         }
+    )
+}
+
+fun AccountabilityPenalty.toProposedAction(): ProposedAction {
+    val payload = JSONObject()
+    val dur = if (durationMinutes > 0) durationMinutes else 60
+    when (type) {
+        "BLOCK_APP" -> {
+            val resolvedTarget = target?.ifBlank { null } ?: title.removePrefix("Block ").trim()
+            payload.put("packageName", resolvedTarget)
+            payload.put("appName", resolvedTarget)
+            payload.put("durationMinutes", dur)
+        }
+        "BLOCK_WEBSITE" -> {
+            val resolvedTarget = target?.ifBlank { null } ?: title.removePrefix("Block ").trim()
+            payload.put("domain", resolvedTarget)
+            payload.put("durationMinutes", dur)
+        }
+        else -> {
+            if (target != null) payload.put("target", target)
+            payload.put("durationMinutes", dur)
+        }
+    }
+    return ProposedAction(
+        id = id,
+        type = type,
+        title = title,
+        reason = reason.ifBlank { description },
+        payload = payload
     )
 }
 
@@ -964,8 +1123,8 @@ fun MessageBubble(msg: CoachMessage) {
                 }
 
                 if (displayResponse.isNotEmpty()) {
-                    Text(
-                        text = displayResponse,
+                    MarkdownText(
+                        markdown = displayResponse,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface
                     )

@@ -69,6 +69,7 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -93,8 +94,14 @@ enum class CoachEngine {
 // AI COACH SCREEN (Sign in with ChatGPT / SIWC)
 // -------------------------------------------------------------
 @Composable
-fun CoachScreen(vm: FitForgeViewModel, onBack: (() -> Unit)? = null) {
-    var selectedEngine by remember { mutableStateOf(CoachEngine.ChatGPT) }
+fun CoachScreen(
+    vm: FitForgeViewModel,
+    onBack: (() -> Unit)? = null,
+    initialEngine: String = "CHATGPT"
+) {
+    var selectedEngine by remember(initialEngine) {
+        mutableStateOf(if (initialEngine == "ISHITA") CoachEngine.Ishita else CoachEngine.ChatGPT)
+    }
 
     Column(Modifier.fillMaxSize()) {
         // Engine Selector
@@ -135,6 +142,12 @@ fun CoachScreen(vm: FitForgeViewModel, onBack: (() -> Unit)? = null) {
         if (selectedEngine == CoachEngine.Ishita) {
             com.fitforge.ishita.ui.IshitaScreen(vm = vm, onBack = onBack)
         } else {
+            DisposableEffect(Unit) {
+                vm.isChatGptScreenVisible = true
+                onDispose {
+                    vm.isChatGptScreenVisible = false
+                }
+            }
             val session = vm.chatGptSession
             val latestBody by vm.latestBody.collectAsState()
             var inputMessage by remember { mutableStateOf("") }
@@ -780,7 +793,7 @@ fun CoachMessageBubble(msg: CoachMessage) {
             colors = CardDefaults.cardColors(
                 containerColor = if (isUser) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
             ),
-            modifier = Modifier.widthIn(max = 320.dp)
+            modifier = Modifier.widthIn(max = 350.dp)
         ) {
             Column(Modifier.padding(12.dp)) {
                 Row(
@@ -809,11 +822,32 @@ fun CoachMessageBubble(msg: CoachMessage) {
                     }
                 }
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    text = msg.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+                if (msg.text.isNotBlank()) {
+                    MarkdownText(
+                        markdown = msg.text,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                } else if (!isUser) {
+                    Row(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(12.dp),
+                            strokeWidth = 1.5.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "AI Coach is thinking...",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         }
     }
