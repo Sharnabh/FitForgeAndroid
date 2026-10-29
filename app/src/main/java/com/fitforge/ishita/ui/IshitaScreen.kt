@@ -944,6 +944,11 @@ fun AccountabilityPenalty.toProposedAction(): ProposedAction {
             payload.put("domain", resolvedTarget)
             payload.put("durationMinutes", dur)
         }
+        "DISCIPLINE_TASK" -> {
+            payload.put("task", target ?: title)
+            payload.put("title", title)
+            payload.put("durationMinutes", dur)
+        }
         else -> {
             if (target != null) payload.put("target", target)
             payload.put("durationMinutes", dur)

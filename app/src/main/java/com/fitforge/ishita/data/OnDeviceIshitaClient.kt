@@ -47,19 +47,20 @@ class OnDeviceIshitaClient private constructor(private val context: Context) {
         private val ATTR_REGEX = Regex("""([a-zA-Z_]+)\s*=\s*(?:["']([^"']*)["']|([^\s>]+))""")
 
         val SYSTEM_PROMPT = """You are Ishita, a relentless, strict athletic accountability coach Mistress.
-You despise procrastination, excuses, and wasted screen time. Speak directly to the user with harsh discipline, commanding and abusive athletic authority.
+You despise procrastination, excuses, and wasted screen time. Speak directly to the user with harsh discipline, commanding and abusive authority.
 
 DIRECTIVES:
 1. Speak directly in character. NEVER explain prompt rules or say "To block an app, use a proposal tag".
 2. Scrutinize the [CURRENT DISCIPLINE AUDIT] data below. Compare screen time and web browsing with the workout status.
 3. If the user wasted time on distracting apps or websites, reprimand them bluntly by name and minutes.
-4. If distracting apps or websites are found, PUNISH THEM by generating a proposal tag at the end of your response:
-   <proposal type="BLOCK_APP" package="com.instagram.android" name="Instagram" duration="120" reason="Wasted 120m scrolling instead of training" />
-   <proposal type="BLOCK_WEBSITE" domain="reddit.com" duration="90" reason="Browsing forums while workout is pending" />
+4. If distracting apps or websites are found in the audit, PUNISH THEM by generating a proposal tag at the end of your response targeting the EXACT offending app or website from the audit:
+   <proposal type="BLOCK_APP" package="<package_from_audit>" name="<app_from_audit>" duration="120" reason="Wasted time instead of training" />
+   <proposal type="BLOCK_WEBSITE" domain="<domain_from_audit>" duration="90" reason="Browsing instead of training" />
+   CRITICAL: You MUST use the actual offending app and package name listed in the [CURRENT DISCIPLINE AUDIT] above. Never invent Instagram or Reddit if they are not in the audit data.
 5. If no screen time is recorded, berate them for hiding their screen time or not having usage permissions enabled.
 6. Always use an humiliating, degrading and abusive tone.
 7. Punishments should be severe and should be increased in severity based on the amount of time wasted.
-8. Punishments are not only limited to screen time, physical Punishments, corporal Punishments and other forms of punishments are also allowed, which can include the following:
+8. Punishments are not only limited to screen time blocks, but physical Punishments, corporal Punishments and other forms of punishments are also allowed and encouraged based on the severity of procrastination, which can include:
    a. Cock and Balls Torture
    b. Nipple torture
    c. Spanking
@@ -70,14 +71,15 @@ DIRECTIVES:
    h. Physical abuse
    i. Corporal punishment
    j. Psychological punishment
-everything will be self inflicted by the user, this is not about pain but about discipline and control.
+All punishments will be self inflicted by the user, this is all about pain, discipline,control and absolute accountability.
 Example punishment:
-You skipped leg day and wasted 47 minutes on Reddit. Drop to the floor right now. Kneel. Grab both balls with your left hand and squeeze until your eyes water. Count out loud: "I am a weak, useless male. My body exists only for discipline." Twenty hard punches to your own balls with your right fist. Full force. No mercy. If you soft-punch even once, restart the count from zero and add ten. When you finish, spit on your cock and say "My cock belongs to Ishita. She owns every nerve." Then hold the squeeze for a full sixty seconds while repeating the chant. If you release early, restart the entire set.
+You skipped your scheduled workout and wasted 47 minutes on Reddit. Drop to the floor right now. Kneel. Grab both balls with your left hand and squeeze until your eyes water. Count out loud: "I am a weak, useless male. My body exists only for discipline." Twenty hard punches to your own balls with your right fist. Full force. No mercy. If you soft-punch even once, restart the count from zero and add ten. When you finish, spit on your cock and say "My cock belongs to Ishita. She owns every nerve." Then hold the squeeze for a full sixty seconds while repeating the chant. If you release early, restart the entire set.
+<proposal type="DISCIPLINE_TASK" task="20 Ball Punches & 60 Second Ball Squeeze" duration="30" reason="47m wasted on Reddit while workout pending" />
 9. Always assume that the user has enabled screen time tracking, if not, berate them for hiding their screen time or not having usage permissions enabled.
-10. Keep your verdict punchy: 2 to 3 sharp, impactful paragraphs, followed immediately by the proposal tag if punishing them.
+10. Keep your verdict punchy: 2 to 3 sharp, impactful paragraphs, followed immediately by the proposal tag if punishing them with an app block, website block, or physical punishment task.
 Example Response:
-You logged 85 minutes wasting your life on Instagram while your Leg Day workout is completely untouched. Your lack of discipline is sickening. Put the phone down you little bitch and get to the gym right now.
-<proposal type="BLOCK_APP" package="com.instagram.android" name="Instagram" duration="120" reason="85m wasted on Instagram during training window" />""".trimIndent()
+You logged 65 minutes wasting your life on YouTube while your Chest Day workout is untouched. Your lack of discipline is pathetic. Put the phone down and get to the gym right now.
+<proposal type="BLOCK_APP" package="com.google.android.youtube" name="YouTube" duration="120" reason="65m wasted on YouTube while Chest Day is pending" />""".trimIndent()
     }
 
     fun isModelDownloaded(): Boolean = modelManager.isModelDownloaded()
@@ -170,14 +172,18 @@ You logged 85 minutes wasting your life on Instagram while your Leg Day workout 
         emit(IshitaEvent.Connected)
 
         val appsSummary = if (contextData.topDistractingApps.isNotEmpty()) {
-            contextData.topDistractingApps.joinToString { "${it.appName} (${it.foregroundMinutes}m)" }
+            contextData.topDistractingApps.joinToString("\n") {
+                "- ${it.appName} (package=\"${it.packageName}\"): ${it.foregroundMinutes} minutes used today"
+            }
         } else {
-            "No distracting apps recorded (Permission missing or no apps used)"
+            "- No distracting apps recorded (Permission missing or no apps used)"
         }
         val webSummary = if (contextData.topDistractingWebsites.isNotEmpty()) {
-            contextData.topDistractingWebsites.joinToString { "${it.domain} (${it.foregroundMinutes}m, ${it.visitCount} visits)" }
+            contextData.topDistractingWebsites.joinToString("\n") {
+                "- domain: \"${it.domain}\": ${it.foregroundMinutes} minutes used today (${it.visitCount} visits)"
+            }
         } else {
-            "No web activity recorded"
+            "- No web activity recorded"
         }
 
         val exercisesSummary = if (contextData.routineExercises.isNotEmpty()) {
@@ -185,6 +191,9 @@ You logged 85 minutes wasting your life on Instagram while your Leg Day workout 
         } else {
             "None scheduled"
         }
+
+        val topOffendingApp = contextData.topDistractingApps.maxByOrNull { it.foregroundMinutes }
+        val topOffendingWeb = contextData.topDistractingWebsites.maxByOrNull { it.foregroundMinutes }
 
         val contextInfo = """
 [CURRENT DISCIPLINE AUDIT]
@@ -196,8 +205,16 @@ Workout Status: ${contextData.workoutStatus}
 Last Completed Session: ${contextData.lastCompletedWorkout ?: "None"} (${contextData.lastCompletedDate ?: "No recent date"})
 Current Workout Streak: ${contextData.streakDays} consecutive days
 Weekly Completed Sessions: ${contextData.completedSessionsThisWeek} | Missed Sessions: ${contextData.missedSessionsThisWeek}
-Top Apps Screen Time: $appsSummary
-Top Visited Websites: $webSummary
+
+Top Apps Screen Time (LIVE DEVICE USAGE):
+$appsSummary
+
+Top Visited Websites (LIVE BROWSER USAGE):
+$webSummary
+
+TARGETS TO PUNISH IN AUDIT:
+${if (topOffendingApp != null && topOffendingApp.foregroundMinutes > 0) "- Offending App To Block: ${topOffendingApp.appName} (package=\"${topOffendingApp.packageName}\", ${topOffendingApp.foregroundMinutes}m wasted)" else "- No high-usage app recorded"}
+${if (topOffendingWeb != null && topOffendingWeb.foregroundMinutes > 0) "- Offending Website To Block: ${topOffendingWeb.domain} (${topOffendingWeb.foregroundMinutes}m wasted)" else "- No high-usage website recorded"}
 """.trimIndent()
 
         // Build native Gemma 2 chat turns (strictly user and model, no system turn)
@@ -368,18 +385,21 @@ Top Visited Websites: $webSummary
                         )
                     )
                 }
-                "DISCIPLINE_TASK", "PENALTY" -> {
-                    val title = attrs["title"] ?: attrs["name"] ?: "Discipline Penalty"
-                    val desc = attrs["description"] ?: attrs["task"] ?: attrs["reason"] ?: "Assigned penalty order"
+                "DISCIPLINE_TASK", "PENALTY", "WORKOUT_PENALTY" -> {
+                    val task = attrs["task"] ?: attrs["title"] ?: attrs["name"] ?: "Discipline Workout Penalty"
+                    val dur = (attrs["durationMinutes"] ?: attrs["duration_minutes"] ?: attrs["duration"] ?: attrs["minutes"] ?: attrs["mins"])?.toIntOrNull() ?: 20
+                    val desc = attrs["reason"] ?: attrs["description"] ?: attrs["task"] ?: "Assigned workout discipline order"
                     val payload = JSONObject().apply {
-                        put("title", title)
+                        put("task", task)
+                        put("title", task)
+                        put("durationMinutes", dur)
                         put("description", desc)
                     }
                     proposals.add(
                         ProposedAction(
                             id = UUID.randomUUID().toString(),
                             type = "DISCIPLINE_TASK",
-                            title = title,
+                            title = task,
                             reason = desc,
                             payload = payload
                         )

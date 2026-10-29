@@ -529,7 +529,7 @@ private fun PenaltyCard(
 
     val typeIcon = when (penalty.type) {
         "BLOCK_APP", "BLOCK_WEBSITE" -> Icons.Default.Block
-        "SCHEDULE_MAKEUP" -> Icons.Default.FitnessCenter
+        "SCHEDULE_MAKEUP", "DISCIPLINE_TASK" -> Icons.Default.FitnessCenter
         "CREATE_REMINDER" -> Icons.Default.Notifications
         else -> Icons.Default.Warning
     }
