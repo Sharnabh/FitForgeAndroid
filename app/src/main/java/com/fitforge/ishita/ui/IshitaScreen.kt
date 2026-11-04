@@ -306,7 +306,7 @@ fun IshitaScreen(
                         )
                     }
                     Text(
-                        if (isModelDownloaded) "On-Device • Offline • Strict Discipline" else "Model Setup Required",
+                        if (isModelDownloaded) "On-Device • Offline • Personal Trainer" else "Model Setup Required",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (isModelDownloaded) FitForgeThemeColors.Primary else MaterialTheme.colorScheme.error
                     )
@@ -1107,7 +1107,7 @@ fun MessageBubble(msg: CoachMessage) {
                                 )
                                 Spacer(Modifier.width(4.dp))
                                 Text(
-                                    if (displayResponse.isEmpty()) "Ishita is analyzing..." else "Discipline Assessment",
+                                    if (displayResponse.isEmpty()) "Ishita is analyzing..." else "Trainer Assessment",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = FitForgeThemeColors.Secondary.copy(alpha = 0.8f),
                                     fontWeight = FontWeight.SemiBold

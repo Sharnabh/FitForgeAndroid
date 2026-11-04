@@ -44,7 +44,7 @@ class IshitaChatManager private constructor(private val context: Context) {
         private const val KEY_MESSAGES_JSON = "ishita_messages_json"
 
         const val DEFAULT_WELCOME_MESSAGE =
-            "I am Ishita, your on-device accountability coach powered by Gemmasutra Mini 2B. Everything runs 100% locally and privately on your phone. I don't tolerate excuses—only discipline and consistency. Did you train today, or did you waste hours staring at screens?"
+            "I am Ishita, your on-device fitness trainer powered by Gemmasutra Mini 2B. Everything runs 100% locally and privately on your phone. I'm here to help you stay consistent, build strength, and reach your fitness goals. How was your training today?"
 
         @Volatile
         private var INSTANCE: IshitaChatManager? = null
@@ -160,7 +160,7 @@ class IshitaChatManager private constructor(private val context: Context) {
                         if (!isScreenVisible && finalText.isNotBlank()) {
                             CoachNotificationHelper.showResponseNotification(
                                 context = context,
-                                coachTitle = "Ishita (Accountability Coach)",
+                                coachTitle = "Ishita (Fitness Trainer)",
                                 previewText = finalText,
                                 engine = "ISHITA"
                             )
