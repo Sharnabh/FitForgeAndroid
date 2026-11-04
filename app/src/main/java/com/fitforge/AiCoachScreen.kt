@@ -20,6 +20,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import android.graphics.BitmapFactory
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import java.io.File
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -57,9 +64,12 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -75,21 +85,79 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
+enum class CoachEngine {
+    ChatGPT,
+    Ishita
+}
+
 // -------------------------------------------------------------
 // AI COACH SCREEN (Sign in with ChatGPT / SIWC)
 // -------------------------------------------------------------
 @Composable
-fun CoachScreen(vm: FitForgeViewModel, onBack: (() -> Unit)? = null) {
-    val session = vm.chatGptSession
-    val latestBody by vm.latestBody.collectAsState()
-    var inputMessage by remember { mutableStateOf("") }
-    val keyboardController = LocalSoftwareKeyboardController.current
+fun CoachScreen(
+    vm: FitForgeViewModel,
+    onBack: (() -> Unit)? = null,
+    initialEngine: String = "CHATGPT"
+) {
+    var selectedEngine by remember(initialEngine) {
+        mutableStateOf(if (initialEngine == "ISHITA") CoachEngine.Ishita else CoachEngine.ChatGPT)
+    }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .padding(16.dp)
-    ) {
+    Column(Modifier.fillMaxSize()) {
+        // Engine Selector
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            TabRow(
+                selectedTabIndex = if (selectedEngine == CoachEngine.ChatGPT) 0 else 1,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.primary
+            ) {
+                Tab(
+                    selected = selectedEngine == CoachEngine.ChatGPT,
+                    onClick = { selectedEngine = CoachEngine.ChatGPT },
+                    text = {
+                        Text(
+                            "Cloud (ChatGPT)",
+                            fontWeight = if (selectedEngine == CoachEngine.ChatGPT) FontWeight.Bold else FontWeight.Normal
+                        )
+                    },
+                    icon = { Icon(Icons.Default.ChatBubbleOutline, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                )
+                Tab(
+                    selected = selectedEngine == CoachEngine.Ishita,
+                    onClick = { selectedEngine = CoachEngine.Ishita },
+                    text = {
+                        Text(
+                            "Local (On-Device)",
+                            fontWeight = if (selectedEngine == CoachEngine.Ishita) FontWeight.Bold else FontWeight.Normal
+                        )
+                    },
+                    icon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                )
+            }
+        }
+
+        if (selectedEngine == CoachEngine.Ishita) {
+            com.fitforge.ishita.ui.IshitaScreen(vm = vm, onBack = onBack)
+        } else {
+            DisposableEffect(Unit) {
+                vm.isChatGptScreenVisible = true
+                onDispose {
+                    vm.isChatGptScreenVisible = false
+                }
+            }
+            val session = vm.chatGptSession
+            val latestBody by vm.latestBody.collectAsState()
+            var inputMessage by remember { mutableStateOf("") }
+            val keyboardController = LocalSoftwareKeyboardController.current
+
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+            ) {
         // Top Header
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -389,37 +457,100 @@ fun CoachScreen(vm: FitForgeViewModel, onBack: (() -> Unit)? = null) {
 
             Spacer(Modifier.height(6.dp))
 
-            // Multimodal Photo Toggle & Status (Opt-in per question)
-            if (latestBody?.photoPath != null) {
+            // Multimodal Photo Toggle & Status (Opt-in per question: Front, Back, Side)
+            val availablePhotos = remember(latestBody) {
+                latestBody?.let { b ->
+                    listOfNotNull(
+                        b.photoPath?.let { "Front" to it },
+                        b.photoPathBack?.let { "Back" to it },
+                        b.photoPathSide?.let { "Side" to it }
+                    ).filter { File(it.second).exists() }
+                } ?: emptyList()
+            }
+
+            if (availablePhotos.isNotEmpty()) {
                 Surface(
-                    shape = RoundedCornerShape(10.dp),
+                    shape = RoundedCornerShape(12.dp),
                     color = if (vm.attachProgressPhoto) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    border = if (vm.attachProgressPhoto) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)) else null,
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { vm.toggleAttachPhoto() }
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(
-                            Icons.Default.CameraAlt,
-                            contentDescription = null,
-                            tint = if (vm.attachProgressPhoto) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "Attach latest progress photo (${latestBody?.date}) for this question (opt-in)",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (vm.attachProgressPhoto) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Switch(
-                            checked = vm.attachProgressPhoto,
-                            onCheckedChange = { vm.toggleAttachPhoto() },
-                            modifier = Modifier.height(24.dp)
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(
+                                    Icons.Default.CameraAlt,
+                                    contentDescription = null,
+                                    tint = if (vm.attachProgressPhoto) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        "Attach ${availablePhotos.size} Progress Photos (${latestBody?.date})",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (vm.attachProgressPhoto) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        "Uploads " + availablePhotos.joinToString(", ") { it.first } + " views altogether to ChatGPT",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = vm.attachProgressPhoto,
+                                onCheckedChange = { vm.toggleAttachPhoto() },
+                                modifier = Modifier.height(24.dp)
+                            )
+                        }
+
+                        // Preview thumbnails of photos to be uploaded
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            availablePhotos.forEach { (label, path) ->
+                                val bm = remember(path) {
+                                    runCatching { BitmapFactory.decodeFile(path)?.asImageBitmap() }.getOrNull()
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.surface,
+                                    modifier = Modifier.size(width = 68.dp, height = 52.dp)
+                                ) {
+                                    Box {
+                                        if (bm != null) {
+                                            Image(
+                                                bitmap = bm,
+                                                contentDescription = label,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
+                                        Surface(
+                                            color = Color.Black.copy(alpha = 0.7f),
+                                            shape = RoundedCornerShape(topEnd = 4.dp),
+                                            modifier = Modifier.align(Alignment.BottomStart)
+                                        ) {
+                                            Text(
+                                                label,
+                                                color = Color.White,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -563,6 +694,8 @@ fun CoachScreen(vm: FitForgeViewModel, onBack: (() -> Unit)? = null) {
             }
         }
     }
+    }
+}
 
     if (vm.showAiConsentDialog) {
         AiCoachConsentDialog(
@@ -660,7 +793,7 @@ fun CoachMessageBubble(msg: CoachMessage) {
             colors = CardDefaults.cardColors(
                 containerColor = if (isUser) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
             ),
-            modifier = Modifier.widthIn(max = 320.dp)
+            modifier = Modifier.widthIn(max = 350.dp)
         ) {
             Column(Modifier.padding(12.dp)) {
                 Row(
@@ -689,11 +822,32 @@ fun CoachMessageBubble(msg: CoachMessage) {
                     }
                 }
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    text = msg.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+                if (msg.text.isNotBlank()) {
+                    MarkdownText(
+                        markdown = msg.text,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                } else if (!isUser) {
+                    Row(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(12.dp),
+                            strokeWidth = 1.5.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "AI Coach is thinking...",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         }
     }
