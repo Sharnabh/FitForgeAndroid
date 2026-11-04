@@ -55,6 +55,8 @@ object FitForgeBackupManager {
             obj.put("weightKg", b.weightKg)
             if (b.waistCm != null) obj.put("waistCm", b.waistCm)
             if (b.photoPath != null) obj.put("photoPath", b.photoPath)
+            if (b.photoPathBack != null) obj.put("photoPathBack", b.photoPathBack)
+            if (b.photoPathSide != null) obj.put("photoPathSide", b.photoPathSide)
             bodyArray.put(obj)
         }
         root.put("bodyEntries", bodyArray)
@@ -204,7 +206,9 @@ object FitForgeBackupManager {
                         date = o.getString("date"),
                         weightKg = o.getDouble("weightKg"),
                         waistCm = if (o.has("waistCm")) o.getDouble("waistCm") else null,
-                        photoPath = if (o.has("photoPath")) o.getString("photoPath") else null
+                        photoPath = if (o.has("photoPath")) o.getString("photoPath") else null,
+                        photoPathBack = if (o.has("photoPathBack")) o.getString("photoPathBack") else null,
+                        photoPathSide = if (o.has("photoPathSide")) o.getString("photoPathSide") else null
                     )
                 )
             }

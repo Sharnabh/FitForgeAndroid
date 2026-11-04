@@ -1,0 +1,309 @@
+import asyncio
+import json
+import os
+import re
+import secrets
+import string
+import time
+import uuid
+from typing import AsyncGenerator
+
+from fastapi import Depends, FastAPI, HTTPException, Header, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+import httpx
+
+import database
+from models import (
+    ActionProposal,
+    ActionStatus,
+    ActionType,
+    ChatRequest,
+    PairCompleteRequest,
+    PairCompleteResponse,
+    PairStartResponse,
+)
+from prompts import ISHITA_SYSTEM_PROMPT, format_context_prompt
+
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "R4C3R/qwen3-8b-heretic:q8_0")
+
+async def get_active_model_name() -> str:
+    target = OLLAMA_MODEL
+    try:
+        async with httpx.AsyncClient(trust_env=False, timeout=5.0) as client:
+            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            if resp.status_code == 200:
+                available = [m.get("name", "") for m in resp.json().get("models", [])]
+                if target in available:
+                    return target
+                # Try matching by prefix (e.g. without tag)
+                base_name = target.split(":")[0]
+                prefix_match = next((m for m in available if m.startswith(base_name)), None)
+                if prefix_match:
+                    return prefix_match
+                if available:
+                    return available[0]
+    except Exception:
+        pass
+    return target
+
+app = FastAPI(title="FitForge Ishita Local Accountability Bridge", version="2.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+def on_startup():
+    database.init_db()
+
+# -------------------------------------------------------------
+# AUTHENTICATION
+# -------------------------------------------------------------
+async def verify_device_token(authorization: str = Header(None)) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid Bearer token"
+        )
+    token = authorization[7:].strip()
+    if not database.is_token_valid(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Device token is invalid or has been revoked"
+        )
+    return token
+
+# -------------------------------------------------------------
+# PAIRING ENDPOINTS
+# -------------------------------------------------------------
+@app.post("/v1/pair/start", response_model=PairStartResponse)
+def start_pairing():
+    """Generates a 6-character single-use code to pair the Android app."""
+    chars = string.ascii_uppercase + string.digits
+    code = "".join(secrets.choice(chars) for _ in range(6))
+    database.create_pairing_code(code, ttl_seconds=300)
+    return PairStartResponse(code=code, expiresInSeconds=300)
+
+@app.post("/v1/pair/complete", response_model=PairCompleteResponse)
+def complete_pairing(req: PairCompleteRequest):
+    """Exchanges a valid pairing code for a persistent device bearer token."""
+    code = req.code.strip().upper()
+    if not database.validate_and_consume_code(code):
+        raise HTTPException(status_code=400, detail="Invalid or expired pairing code")
+
+    token = secrets.token_hex(32)
+    database.store_device_token(token, req.deviceName)
+    return PairCompleteResponse(token=token)
+
+# -------------------------------------------------------------
+# HEALTH & STATUS
+# -------------------------------------------------------------
+@app.get("/v1/health")
+async def health_check():
+    ollama_ok = False
+    models = []
+    try:
+        async with httpx.AsyncClient(trust_env=False, timeout=5.0) as client:
+            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            if resp.status_code == 200:
+                ollama_ok = True
+                data = resp.json()
+                models = [m.get("name") for m in data.get("models", [])]
+    except Exception:
+        pass
+
+    active_model = await get_active_model_name()
+    return {
+        "status": "healthy" if ollama_ok else "degraded",
+        "ollamaConnected": ollama_ok,
+        "activeModel": active_model,
+        "availableModels": models
+    }
+
+# -------------------------------------------------------------
+# CHAT & PROPOSALS STREAMING
+# -------------------------------------------------------------
+PROPOSAL_REGEX = re.compile(r'<proposal\s+([^>]+)/>', re.IGNORECASE)
+ATTR_REGEX = re.compile(r'(\w+)="([^"]*)"')
+
+def parse_proposals_from_text(full_text: str):
+    proposals = []
+    for match in PROPOSAL_REGEX.finditer(full_text):
+        raw_attrs = match.group(1)
+        attrs = dict(ATTR_REGEX.findall(raw_attrs))
+        p_type = attrs.get("type", "").upper()
+
+        if p_type == "BLOCK_APP":
+            proposals.append(ActionProposal(
+                id=str(uuid.uuid4()),
+                type=ActionType.BLOCK_APP,
+                title=f"Block {attrs.get('name', 'App')}",
+                reason=attrs.get("reason", "Accountability penalty for missed session"),
+                payload={
+                    "packageName": attrs.get("package", ""),
+                    "appName": attrs.get("name", ""),
+                    "durationMinutes": int(attrs.get("duration", "60"))
+                }
+            ))
+        elif p_type == "BLOCK_WEBSITE":
+            proposals.append(ActionProposal(
+                id=str(uuid.uuid4()),
+                type=ActionType.BLOCK_WEBSITE,
+                title=f"Block {attrs.get('domain', 'Website')}",
+                reason=attrs.get("reason", "Accountability restriction on distracting website"),
+                payload={
+                    "domain": attrs.get("domain", ""),
+                    "durationMinutes": int(attrs.get("duration", "60"))
+                }
+            ))
+        elif p_type == "SCHEDULE_MAKEUP":
+            proposals.append(ActionProposal(
+                id=str(uuid.uuid4()),
+                type=ActionType.SCHEDULE_MAKEUP,
+                title=f"Schedule {attrs.get('routine', 'Makeup Session')}",
+                reason=attrs.get("reason", "Makeup session for skipped training"),
+                payload={
+                    "dayOffset": int(attrs.get("day_offset", "1")),
+                    "routineName": attrs.get("routine", "Makeup Routine")
+                }
+            ))
+        elif p_type == "CREATE_REMINDER":
+            proposals.append(ActionProposal(
+                id=str(uuid.uuid4()),
+                type=ActionType.CREATE_REMINDER,
+                title="Accountability Reminder",
+                reason=attrs.get("reason", "Follow-through reminder"),
+                payload={
+                    "message": attrs.get("message", "Time to train")
+                }
+            ))
+    return proposals
+
+async def stream_ollama_response(req: ChatRequest) -> AsyncGenerator[str, None]:
+    system_instruction = ISHITA_SYSTEM_PROMPT + "\n\n" + format_context_prompt(req.context)
+
+    messages = [{"role": "system", "content": system_instruction}]
+    for h in req.history:
+        messages.append({"role": h.role, "content": h.content})
+    messages.append({"role": "user", "content": req.message})
+
+    active_model = await get_active_model_name()
+    payload = {
+        "model": active_model,
+        "messages": messages,
+        "stream": True,
+        "options": {
+            "num_thread": 6,
+            "temperature": 0.7,
+            "num_predict": 512,
+        }
+    }
+
+    full_response_text = ""
+
+    # Immediately yield an initial SSE ping so HTTP 200 headers are sent instantly
+    # to the Android app without waiting for Ollama prompt evaluation or cold load
+    yield "event: ping\ndata: {}\n\n"
+
+    queue = asyncio.Queue()
+
+    async def fetch_ollama():
+        try:
+            timeout = httpx.Timeout(connect=30.0, read=300.0, write=60.0, pool=60.0)
+            async with httpx.AsyncClient(trust_env=False, timeout=timeout) as client:
+                async with client.stream("POST", f"{OLLAMA_BASE_URL}/api/chat", json=payload) as response:
+                    if response.status_code != 200:
+                        await queue.put(("error", f"Ollama error: {response.status_code}"))
+                        return
+
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                            msg = chunk.get("message", {})
+                            content = msg.get("content", "")
+                            thinking = msg.get("thinking", "")
+                            token_delta = thinking if thinking else content
+                            if token_delta:
+                                await queue.put(("text", token_delta))
+                            if chunk.get("done", False):
+                                break
+                        except Exception:
+                            pass
+        except Exception as e:
+            await queue.put(("error", str(e)))
+        finally:
+            await queue.put(("done", None))
+
+    fetch_task = asyncio.create_task(fetch_ollama())
+
+    try:
+        while True:
+            try:
+                # Wait up to 4 seconds for next token; if none yet, send heartbeat ping
+                event_type, data = await asyncio.wait_for(queue.get(), timeout=4.0)
+                if event_type == "text":
+                    full_response_text += data
+                    yield f"event: text\ndata: {json.dumps({'delta': data})}\n\n"
+                elif event_type == "error":
+                    yield f"event: error\ndata: {json.dumps({'error': data})}\n\n"
+                    return
+                elif event_type == "done":
+                    break
+            except asyncio.TimeoutError:
+                # Periodic keepalive ping to prevent any client or network socket read timeout
+                yield "event: ping\ndata: {}\n\n"
+    finally:
+        if not fetch_task.done():
+            fetch_task.cancel()
+
+    # Post-process full response for proposals
+    detected_proposals = parse_proposals_from_text(full_response_text)
+    for p in detected_proposals:
+        database.save_proposal(p)
+        yield f"event: proposal\ndata: {json.dumps(p.dict())}\n\n"
+
+    yield "event: done\ndata: {}\n\n"
+
+@app.post("/v1/chat")
+async def chat_with_coach(req: ChatRequest, token: str = Depends(verify_device_token)):
+    """Streams Ishita's response as Server-Sent Events (SSE)."""
+    return StreamingResponse(
+        stream_ollama_response(req),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+# -------------------------------------------------------------
+# ACTION PROPOSAL CONFIRMATION & AUDIT
+# -------------------------------------------------------------
+@app.get("/v1/actions/pending")
+def list_pending_actions(token: str = Depends(verify_device_token)):
+    proposals = database.get_pending_proposals()
+    return {"proposals": [p.dict() for p in proposals]}
+
+@app.post("/v1/actions/{action_id}/confirm")
+def confirm_action(action_id: str, token: str = Depends(verify_device_token)):
+    success = database.update_proposal_status(action_id, ActionStatus.CONFIRMED)
+    if not success:
+        raise HTTPException(status_code=404, detail="Proposal not found or already handled")
+    return {"status": "confirmed", "actionId": action_id}
+
+@app.post("/v1/actions/{action_id}/reject")
+def reject_action(action_id: str, token: str = Depends(verify_device_token)):
+    success = database.update_proposal_status(action_id, ActionStatus.REJECTED)
+    if not success:
+        raise HTTPException(status_code=404, detail="Proposal not found or already handled")
+    return {"status": "rejected", "actionId": action_id}

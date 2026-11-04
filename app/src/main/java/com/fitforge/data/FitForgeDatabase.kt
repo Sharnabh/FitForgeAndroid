@@ -21,7 +21,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RoutineExercise::class,
         WorkoutSchedule::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = true
 )
 abstract class FitForgeDatabase : RoomDatabase() {
@@ -104,6 +104,17 @@ abstract class FitForgeDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                try {
+                    db.execSQL("ALTER TABLE `body_entries` ADD COLUMN `photoPathBack` TEXT DEFAULT NULL")
+                } catch (ignored: Exception) {}
+                try {
+                    db.execSQL("ALTER TABLE `body_entries` ADD COLUMN `photoPathSide` TEXT DEFAULT NULL")
+                } catch (ignored: Exception) {}
+            }
+        }
+
         fun get(context: Context): FitForgeDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -111,7 +122,7 @@ abstract class FitForgeDatabase : RoomDatabase() {
                     FitForgeDatabase::class.java,
                     "fitforge.db"
                 )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .fallbackToDestructiveMigrationOnDowngrade()
                 .build().also { INSTANCE = it }
             }

@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">FitForge</string>
+    <string name="accessibility_service_desc">Observes distracting browser URLs and enforces user-confirmed workout accountability blocks.</string>
+</resources>

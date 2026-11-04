@@ -101,6 +101,7 @@ object ChatGptClient {
         userPrompt: String,
         fitnessContext: String,
         photoPath: String? = null,
+        photoPaths: List<String> = emptyList(),
         conversationHistory: List<CoachMessage> = emptyList(),
         modelSlug: String? = null,
         onDelta: (String) -> Unit
@@ -141,7 +142,7 @@ object ChatGptClient {
                 - You are NOT a medical doctor, registered dietitian, or licensed physical therapist.
                 - Do not provide clinical medical diagnosis, prescription, or clinical dietary treatment.
                 - If the user reports acute pain, injury, eating disorder behaviors, or unsafe/extreme caloric deficits (<1200 kcal/day), firmly and compassionately advise them to consult a qualified physician or healthcare professional.
-                - When progress photos are provided, discuss general posture, symmetry, and habit consistency respectfully and objectively without body-shaming. Keep responses concise and formatted with clean bullet points.
+                - When progress photos (front, back, and/or side views) are provided, evaluate posture, spinal alignment, front-to-back balance, muscular symmetry, and habit consistency respectfully, constructively, and objectively. Keep responses concise and formatted with clean bullet points.
             """.trimIndent()
 
             // Build request payload according to Responses API preview specification
@@ -178,25 +179,28 @@ object ChatGptClient {
                 appendLine(userPrompt)
             }
 
-            // Optional multimodal photo attached
-            if (!photoPath.isNullOrBlank()) {
-                val base64DataUri = loadAndCompressImageBase64(context, photoPath)
-                if (base64DataUri != null) {
-                    val contentArr = JSONArray()
-                    val textObj = JSONObject().apply {
-                        put("type", "input_text")
-                        put("text", combinedText)
-                    }
-                    val imageObj = JSONObject().apply {
-                        put("type", "input_image")
-                        put("image_url", base64DataUri)
-                    }
-                    contentArr.put(textObj)
-                    contentArr.put(imageObj)
-                    currentTurn.put("content", contentArr)
-                } else {
-                    currentTurn.put("content", combinedText)
+            // Optional multimodal photos attached (front, back, and side views altogether)
+            val allPhotos = (photoPaths + listOfNotNull(photoPath)).filter { it.isNotBlank() }.distinct()
+            if (allPhotos.isNotEmpty()) {
+                val contentArr = JSONArray()
+                val textObj = JSONObject().apply {
+                    put("type", "input_text")
+                    put("text", combinedText)
                 }
+                contentArr.put(textObj)
+
+                for (path in allPhotos) {
+                    val base64DataUri = loadAndCompressImageBase64(context, path)
+                    if (base64DataUri != null) {
+                        val imageObj = JSONObject().apply {
+                            put("type", "input_image")
+                            put("image_url", base64DataUri)
+                        }
+                        contentArr.put(imageObj)
+                    }
+                }
+
+                currentTurn.put("content", contentArr)
             } else {
                 currentTurn.put("content", combinedText)
             }
@@ -320,40 +324,51 @@ object ChatGptClient {
      * Extracts incremental text chunk from various SSE JSON delta formats.
      */
     private fun extractDeltaText(json: JSONObject): String? {
-        // OpenAI Responses API: {"type":"response.output_text.delta","delta":"..."}
         val type = json.optString("type")
+
+        // 1. OpenAI Responses API streaming delta: {"type":"response.output_text.delta","delta":"..."}
         if (type == "response.output_text.delta") {
             val delta = json.opt("delta")
             if (delta is String) return delta
             if (delta is JSONObject) {
-                return delta.optString("text").ifEmpty { delta.optString("content") }
+                val t = delta.optString("text")
+                if (t.isNotEmpty()) return t
+                val c = delta.optString("content")
+                if (c.isNotEmpty()) return c
             }
+            return null
         }
 
-        // Generic delta string
-        val deltaObj = json.opt("delta")
-        if (deltaObj is String && deltaObj.isNotEmpty()) {
-            return deltaObj
-        }
-        if (deltaObj is JSONObject) {
-            val text = deltaObj.optString("text")
-            if (text.isNotEmpty()) return text
-            val content = deltaObj.optString("content")
-            if (content.isNotEmpty()) return content
+        // Ignore completion, added, or lifecycle events that contain the entire text and would duplicate the response
+        if (type.isNotEmpty() && (type.endsWith(".done") || type.endsWith(".completed") || type.endsWith(".added") || type.startsWith("response.created"))) {
+            return null
         }
 
-        // Chat completion SSE format choices[0].delta.content
+        // 2. Chat completion SSE format (choices[0].delta.content)
         val choices = json.optJSONArray("choices")
         if (choices != null && choices.length() > 0) {
             val choice = choices.optJSONObject(0)
             val d = choice?.optJSONObject("delta")
             val content = d?.optString("content")
             if (!content.isNullOrEmpty()) return content
+            val text = d?.optString("text")
+            if (!text.isNullOrEmpty()) return text
+            return null
         }
 
-        // Direct text output
-        val text = json.optString("text")
-        if (text.isNotEmpty()) return text
+        // 3. Generic delta event only if type contains "delta"
+        if (type.contains("delta", ignoreCase = true)) {
+            val deltaObj = json.opt("delta")
+            if (deltaObj is String && deltaObj.isNotEmpty()) {
+                return deltaObj
+            }
+            if (deltaObj is JSONObject) {
+                val text = deltaObj.optString("text")
+                if (text.isNotEmpty()) return text
+                val content = deltaObj.optString("content")
+                if (content.isNotEmpty()) return content
+            }
+        }
 
         return null
     }

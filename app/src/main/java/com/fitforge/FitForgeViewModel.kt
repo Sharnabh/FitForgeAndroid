@@ -142,7 +142,46 @@ class FitForgeViewModel(
         private set
     var authStatusMessage by mutableStateOf<String?>(null)
         private set
-    var coachMessages by mutableStateOf<List<CoachMessage>>(emptyList())
+
+    var isChatGptScreenVisible by mutableStateOf(false)
+
+    private fun loadCoachMessages(): List<CoachMessage> {
+        val raw = prefs.getString("chatgpt_coach_messages_json", null) ?: return emptyList()
+        val list = mutableListOf<CoachMessage>()
+        try {
+            val array = org.json.JSONArray(raw)
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                list.add(
+                    CoachMessage(
+                        id = obj.optString("id", java.util.UUID.randomUUID().toString()),
+                        isUser = obj.getBoolean("isUser"),
+                        text = obj.getString("text"),
+                        hasPhotoAttached = obj.optBoolean("hasPhotoAttached", false),
+                        timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+                    )
+                )
+            }
+        } catch (_: Exception) {}
+        return list
+    }
+
+    private fun persistCoachMessages(messages: List<CoachMessage>) {
+        val array = org.json.JSONArray()
+        messages.forEach { m ->
+            val obj = org.json.JSONObject().apply {
+                put("id", m.id)
+                put("isUser", m.isUser)
+                put("text", m.text)
+                put("hasPhotoAttached", m.hasPhotoAttached)
+                put("timestamp", m.timestamp)
+            }
+            array.put(obj)
+        }
+        prefs.edit().putString("chatgpt_coach_messages_json", array.toString()).apply()
+    }
+
+    var coachMessages by mutableStateOf<List<CoachMessage>>(loadCoachMessages())
         private set
     var isCoachStreaming by mutableStateOf(false)
         private set
@@ -197,6 +236,7 @@ class FitForgeViewModel(
         isCoachStreaming = false
         coachMessages = emptyList()
         coachError = null
+        prefs.edit().remove("chatgpt_coach_messages_json").apply()
     }
 
     fun stopCoachStreaming() {
@@ -471,8 +511,16 @@ class FitForgeViewModel(
         }
     }
 
-    // Body weight & measurements
-    fun addBody(weight: Double, waist: Double?, photoPath: String? = null, neck: Double? = null, chest: Double? = null, note: String = "") {
+    fun addBody(
+        weight: Double,
+        waist: Double?,
+        photoPath: String? = null,
+        photoPathBack: String? = null,
+        photoPathSide: String? = null,
+        neck: Double? = null,
+        chest: Double? = null,
+        note: String = ""
+    ) {
         if (weight <= 0) return
         viewModelScope.launch {
             dao.insertBodyEntry(
@@ -483,6 +531,8 @@ class FitForgeViewModel(
                     neckCm = neck,
                     chestCm = chest,
                     photoPath = photoPath,
+                    photoPathBack = photoPathBack,
+                    photoPathSide = photoPathSide,
                     note = note
                 )
             )
@@ -1120,8 +1170,11 @@ class FitForgeViewModel(
     }
 
     fun clearCoachChat() {
+        coachJob?.cancel()
+        isCoachStreaming = false
         coachMessages = emptyList()
         coachError = null
+        prefs.edit().remove("chatgpt_coach_messages_json").apply()
     }
 
     fun buildFitnessContext(): String {
@@ -1197,7 +1250,11 @@ class FitForgeViewModel(
 
         val session = chatGptSession ?: return
         val contextSummary = buildFitnessContext()
-        val photoToAttach = if (attachProgressPhoto) latestBody.value?.photoPath else null
+        val photosToAttach = if (attachProgressPhoto) {
+            latestBody.value?.let { b ->
+                listOfNotNull(b.photoPath, b.photoPathBack, b.photoPathSide).filter { it.isNotBlank() }
+            } ?: emptyList()
+        } else emptyList()
 
         // Opt-in per-request: reset immediately so subsequent messages do not automatically re-upload photo
         attachProgressPhoto = false
@@ -1205,7 +1262,7 @@ class FitForgeViewModel(
         val userMessage = CoachMessage(
             isUser = true,
             text = prompt,
-            hasPhotoAttached = photoToAttach != null
+            hasPhotoAttached = photosToAttach.isNotEmpty()
         )
         val placeholder = CoachMessage(
             isUser = false,
@@ -1213,6 +1270,7 @@ class FitForgeViewModel(
         )
 
         coachMessages = coachMessages + userMessage + placeholder
+        persistCoachMessages(coachMessages)
         isCoachStreaming = true
         coachError = null
 
@@ -1245,7 +1303,7 @@ class FitForgeViewModel(
                 accessToken = token,
                 userPrompt = prompt,
                 fitnessContext = contextSummary,
-                photoPath = photoToAttach,
+                photoPaths = photosToAttach,
                 conversationHistory = coachMessages.dropLast(2),
                 modelSlug = modelToUse,
                 onDelta = { delta ->
@@ -1273,6 +1331,17 @@ class FitForgeViewModel(
                         updatedList.removeAt(updatedList.lastIndex)
                     }
                     coachMessages = updatedList
+                    persistCoachMessages(coachMessages)
+                }
+            } else {
+                persistCoachMessages(coachMessages)
+                if (!isChatGptScreenVisible && accumulatedText.isNotBlank()) {
+                    com.fitforge.ishita.service.CoachNotificationHelper.showResponseNotification(
+                        context = context,
+                        coachTitle = "AI Coach (ChatGPT)",
+                        previewText = accumulatedText,
+                        engine = "CHATGPT"
+                    )
                 }
             }
         }
